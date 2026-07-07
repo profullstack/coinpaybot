@@ -1,0 +1,29 @@
+name: 'CoinPayPortal invoice command'
+description: 'Create CoinPayPortal crypto invoices and payment links from GitHub issue and PR comments.'
+author: 'profullstack'
+branding:
+  icon: 'dollar-sign'
+  color: 'purple'
+inputs:
+  github-token:
+    description: 'Token used to read comments and post replies/labels. Usually ${{ secrets.GITHUB_TOKEN }}.'
+    required: true
+    default: ${{ github.token }}
+  coinpay-api-key:
+    description: 'CoinPayPortal API key (cp_live_...). Store as a repository secret.'
+    required: true
+  coinpay-business-id:
+    description: 'CoinPayPortal business id that owns the receiving wallet.'
+    required: true
+  coinpay-base-url:
+    description: 'CoinPayPortal base URL.'
+    required: false
+    default: 'https://coinpayportal.com'
+outputs:
+  action:
+    description: 'What the bot did (invoice_created, request_pending, help, error, ...).'
+  payment_id:
+    description: 'CoinPayPortal payment id, when a payment was created.'
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

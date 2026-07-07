@@ -1,0 +1,24 @@
+# Copy to .github/workflows/coinpay.yml in a consumer repository.
+# Requires repository secrets COINPAY_API_KEY and COINPAY_BUSINESS_ID.
+name: CoinPayPortal invoice command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  coinpay:
+    # Only spin up when a comment actually invokes the bot.
+    if: startsWith(github.event.comment.body, '/coinpay')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: profullstack/coinpaybot@v0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          coinpay-api-key: ${{ secrets.COINPAY_API_KEY }}
+          coinpay-business-id: ${{ secrets.COINPAY_BUSINESS_ID }}
+          # coinpay-base-url: https://coinpayportal.com  # optional
