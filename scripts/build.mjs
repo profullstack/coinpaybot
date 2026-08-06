@@ -6,7 +6,7 @@ await build({
   entryPoints: ['src/main.ts'],
   bundle: true,
   platform: 'node',
-  target: 'node20',
+  target: 'node24',
   format: 'esm',
   outfile: 'dist/index.js',
   banner: {
