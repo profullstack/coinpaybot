@@ -6,7 +6,7 @@ branding:
   color: 'purple'
 inputs:
   github-token:
-    description: 'Token used to read comments and post replies/labels. Usually ${{ secrets.GITHUB_TOKEN }}.'
+    description: 'Token used to read comments and post replies/labels. Usually the GITHUB_TOKEN secret.'
     required: true
     default: ${{ github.token }}
   coinpay-api-key:
