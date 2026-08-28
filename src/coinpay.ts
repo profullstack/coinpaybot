@@ -2,8 +2,10 @@
  * CoinPayPortal adapter.
  *
  * Every request/response shape here was verified against the live coinpayportal
- * `master` source (2026-07-07): src/app/api/payments/create/route.ts,
- * src/app/api/invoices/route.ts, and src/lib/webhooks/service.ts.
+ * `master` source at 86a4dd003c455df78c772a3f71bd8512eb7fbc84
+ * (2026-08-28): src/app/api/payments/create/route.ts,
+ * src/app/api/invoices/route.ts, src/lib/webhooks/service.ts, and
+ * supabase/migrations/20260816020041_payment_idempotency_key.sql.
  *
  * Verified facts encoded below:
  *  - Auth: `Authorization: Bearer cp_live_...` works for both endpoints
@@ -15,6 +17,12 @@
  *  - 400 "No {crypto} wallet configured..." when the business has no receiving
  *    wallet for the chain and no merchant_wallet_address override.
  *  - 429 with { usage } when the plan's monthly transaction cap is hit.
+ *  - Idempotency: payments/create accepts `Idempotency-Key` or the
+ *    `idempotency_key` body field, scopes lookup by business, stores the key in
+ *    payment metadata, and returns the original payment on replay. A partial
+ *    unique database index on (business_id, metadata.idempotency_key) closes
+ *    the concurrent read-then-insert race, so retrying an ambiguous timeout or
+ *    5xx with the same key cannot create a second payable payment.
  *  - Webhook signature header `X-CoinPay-Signature: t=<unix>,v1=<hex>` where
  *    hex = HMAC_SHA256(`${t}.${rawBody}`, webhook_secret), 300s tolerance.
  */
@@ -41,6 +49,8 @@ export interface CreatePaymentInput {
   /** Optional payout override → `merchant_wallet_address`. */
   walletAddress?: string;
   metadata?: Record<string, unknown>;
+  /** Stable payment identity, forwarded through both supported API forms. */
+  idempotencyKey?: string;
 }
 
 export interface CreatePaymentResult {
@@ -116,10 +126,14 @@ export class CoinPayClient {
     if (input.redirectUrl) body['redirect_url'] = input.redirectUrl;
     if (input.walletAddress) body['merchant_wallet_address'] = input.walletAddress;
     if (input.metadata) body['metadata'] = input.metadata;
+    if (input.idempotencyKey) body['idempotency_key'] = input.idempotencyKey;
 
     const json = await this.post<{ success: boolean; payment?: any; error?: string; usage?: unknown }>(
       '/api/payments/create',
       body,
+      input.idempotencyKey
+        ? { 'Idempotency-Key': input.idempotencyKey }
+        : undefined,
     );
 
     if (!json.success || !json.payment?.id) {
@@ -145,21 +159,31 @@ export class CoinPayClient {
     return { status, raw: json };
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
-    const res = await this.call('POST', path, body);
+  private async post<T>(
+    path: string,
+    body: unknown,
+    headers?: Record<string, string>,
+  ): Promise<T> {
+    const res = await this.call('POST', path, body, headers);
     const json = (await res.json().catch(() => null)) as (T & { error?: string; usage?: unknown }) | null;
     if (!res.ok) throw classify(res.status, json);
     if (json === null) throw new CoinPayError('SERVER', 'Empty response body', res.status);
     return json;
   }
 
-  private async call(method: string, path: string, body?: unknown): Promise<Response> {
+  private async call(
+    method: string,
+    path: string,
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+  ): Promise<Response> {
     try {
       return await this.fetchImpl(`${this.baseUrl}${path}`, {
         method,
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiKey}`,
+          ...extraHeaders,
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       });

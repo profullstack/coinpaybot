@@ -96,6 +96,27 @@ describe('CoinPayClient.createPayment — request contract', () => {
     expect(captured!.body.merchant_wallet_address).toBe('0xdeadbeef');
     expect(captured!.url).toBe('https://coinpayportal.com/api/payments/create');
   });
+
+  it('forwards an idempotency key in both API-supported forms', async () => {
+    let captured: Captured | undefined;
+    const client = new CoinPayClient({
+      baseUrl: 'https://coinpayportal.com',
+      apiKey: 'cp_live_x',
+      businessId: 'biz_1',
+      fetchImpl: mockFetch(201, VERIFIED_PAYMENT_RESPONSE, (c) => (captured = c)),
+    });
+    const key = 'a'.repeat(64);
+
+    await client.createPayment({
+      amountUsd: 10,
+      crypto: 'usdc_base',
+      walletAddress: '0xdeadbeef',
+      idempotencyKey: key,
+    });
+
+    expect(captured!.headers['Idempotency-Key']).toBe(key);
+    expect(captured!.body.idempotency_key).toBe(key);
+  });
 });
 
 describe('CoinPayClient.createPayment — error contract', () => {

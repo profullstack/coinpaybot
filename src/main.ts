@@ -50,6 +50,8 @@ export async function run(): Promise<void> {
   const apiKey = core.getInput('coinpay-api-key', { required: true });
   const businessId = core.getInput('coinpay-business-id', { required: true });
   const baseUrl = core.getInput('coinpay-base-url') || 'https://coinpayportal.com';
+  const trustedCommentAuthor =
+    core.getInput('trusted-comment-author') || 'github-actions[bot]';
 
   const ref = {
     owner: github.context.repo.owner,
@@ -57,7 +59,7 @@ export async function run(): Promise<void> {
     issueNumber: payload.issue.number as number,
   };
 
-  const gh = new OctokitGitHubClient(token);
+  const gh = new OctokitGitHubClient(token, trustedCommentAuthor);
   const config = await loadRepoConfig(gh, token, ref);
   const coinpay = new CoinPayClient({ baseUrl, apiKey, businessId });
 
@@ -68,6 +70,7 @@ export async function run(): Promise<void> {
     actor: (payload.comment.user?.login as string) ?? 'unknown',
     authorAssociation: (payload.comment.author_association as string) ?? 'NONE',
     issueUrl: (payload.issue.html_url as string) ?? '',
+    isPullRequest: payload.issue.pull_request !== undefined,
   };
 
   const result = await handleComment(evt, { coinpay, github: gh, config });

@@ -7,7 +7,16 @@
  *    by scanning the thread, instead of a persisted request record.
  */
 
-import type { InvoiceCommand } from './parser.js';
+import {
+  isCanonicalUsdAmount,
+  SUPPORTED_CRYPTO,
+  type InvoiceCommand,
+} from './parser.js';
+import {
+  isTrustedAuthor,
+  type PullRequestContext,
+  type ThreadComment,
+} from './github.js';
 
 export interface PendingRequest {
   amount: number;
@@ -22,14 +31,20 @@ export interface PendingRequest {
 
 const HANDLED_RE = /<!--\s*coinpay:handled\s+(\d+)\s*-->/g;
 const REQUEST_RE = /<!--\s*coinpay:request\s+(\{.*?\})\s*-->/s;
+const REQUEST_V2_RE = /<!--\s*coinpay:request:v2\s+([A-Za-z0-9_-]+)\s*-->/;
+const PAYMENT_RE = /<!--\s*coinpay:payment\s+([a-f0-9]{64})\s*-->/g;
+
+function trustedBodies(comments: ThreadComment[]): string[] {
+  return comments.filter(isTrustedAuthor).map((comment) => comment.body);
+}
 
 export function handledMarker(commentId: number): string {
   return `<!-- coinpay:handled ${commentId} -->`;
 }
 
 /** Has any of these existing comment bodies already handled `commentId`? */
-export function isHandled(existingBodies: string[], commentId: number): boolean {
-  for (const body of existingBodies) {
+export function isHandled(comments: ThreadComment[], commentId: number): boolean {
+  for (const body of trustedBodies(comments)) {
     HANDLED_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = HANDLED_RE.exec(body)) !== null) {
@@ -40,22 +55,116 @@ export function isHandled(existingBodies: string[], commentId: number): boolean 
 }
 
 export function requestMarker(req: PendingRequest): string {
-  return `<!-- coinpay:request ${JSON.stringify(req)} -->`;
+  const encoded = Buffer.from(JSON.stringify(req), 'utf8').toString('base64url');
+  return `<!-- coinpay:request:v2 ${encoded} -->`;
 }
 
 /** Recover the most recent pending request embedded in the thread, if any. */
-export function findPendingRequest(existingBodies: string[]): PendingRequest | null {
+export function findPendingRequest(comments: ThreadComment[]): PendingRequest | null {
+  const existingBodies = trustedBodies(comments);
   for (let i = existingBodies.length - 1; i >= 0; i--) {
-    const m = REQUEST_RE.exec(existingBodies[i] ?? '');
-    if (m && m[1]) {
+    const body = existingBodies[i] ?? '';
+    const encoded = REQUEST_V2_RE.exec(body)?.[1];
+    const legacy = REQUEST_RE.exec(body)?.[1];
+    if (encoded || legacy) {
       try {
-        return JSON.parse(m[1]) as PendingRequest;
+        const value = JSON.parse(
+          encoded ? Buffer.from(encoded, 'base64url').toString('utf8') : legacy!,
+        ) as unknown;
+        if (isPendingRequest(value)) return value;
       } catch {
         /* ignore malformed marker */
       }
     }
   }
   return null;
+}
+
+function isPendingRequest(value: unknown): value is PendingRequest {
+  if (!value || typeof value !== 'object') return false;
+  const request = value as Partial<PendingRequest>;
+  return (
+    isCanonicalUsdAmount(request.amount) &&
+    request.fiat === 'USD' &&
+    typeof request.crypto === 'string' &&
+    SUPPORTED_CRYPTO.has(request.crypto) &&
+    typeof request.requester === 'string' &&
+    request.requester.trim().length > 0 &&
+    Number.isSafeInteger(request.commentId) &&
+    request.commentId! > 0 &&
+    (request.wallet === undefined || typeof request.wallet === 'string') &&
+    (request.description === undefined || typeof request.description === 'string')
+  );
+}
+
+export function paymentMarker(idempotencyKey: string): string {
+  return `<!-- coinpay:payment ${idempotencyKey} -->`;
+}
+
+export function hasPaymentMarker(
+  comments: ThreadComment[],
+  idempotencyKey: string,
+): boolean {
+  for (const body of trustedBodies(comments)) {
+    PAYMENT_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = PAYMENT_RE.exec(body)) !== null) {
+      if (match[1] === idempotencyKey) return true;
+    }
+  }
+  return false;
+}
+
+function neutralizeHtmlComments(value: string): string {
+  return value.replace(/<!--/g, '&lt;!--').replace(/-->/g, '--&gt;');
+}
+
+function cleanSummaryText(value: string): string {
+  const flattened = value
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return neutralizeHtmlComments(flattened);
+}
+
+function markdownLinkText(value: string): string {
+  return cleanSummaryText(value).replace(/[\\\[\]]/g, '\\$&');
+}
+
+function markdownCodeText(value: string): string {
+  return cleanSummaryText(value).replace(/`/g, '&#96;');
+}
+
+/** Render untrusted prose without allowing links or any other Markdown. */
+function markdownCodeSpan(value: string): string {
+  const text = cleanSummaryText(value);
+  const longestRun = Math.max(
+    0,
+    ...(text.match(/`+/g) ?? []).map((run) => run.length),
+  );
+  const fence = '`'.repeat(longestRun + 1);
+  return `${fence} ${text} ${fence}`;
+}
+
+export function pullRequestSummary(context: PullRequestContext): string {
+  const parts = [`PR #${context.number}: ${cleanSummaryText(context.title)}`];
+  for (const issue of context.linkedIssues) {
+    parts.push(
+      `Issue ${issue.owner}/${issue.repo}#${issue.number}: ${cleanSummaryText(issue.title)}`,
+    );
+  }
+  return parts.join(' | ').slice(0, 5000);
+}
+
+function sourceLines(context?: PullRequestContext): string[] {
+  if (!context) return [];
+  return [
+    `**Work:** [PR #${context.number}: ${markdownLinkText(context.title)}](${context.url})  `,
+    ...context.linkedIssues.map(
+      (issue) =>
+        `**Linked issue:** [${issue.owner}/${issue.repo}#${issue.number}: ${markdownLinkText(issue.title)}](${issue.url})  `,
+    ),
+  ];
 }
 
 function fmtAmount(amount: number, fiat: string): string {
@@ -65,18 +174,48 @@ function fmtAmount(amount: number, fiat: string): string {
 export function successComment(args: {
   amount: number; fiat: string; crypto: string; description?: string;
   paymentId: string; payLink: string; actor: string; handledCommentId: number;
+  idempotencyKey: string; source?: PullRequestContext;
 }): string {
   return [
     '### CoinPayPortal invoice created',
     '',
     `**Amount:** ${fmtAmount(args.amount, args.fiat)}  `,
-    `**Crypto:** ${args.crypto}  `,
-    ...(args.description ? [`**Description:** ${args.description}  `] : []),
-    `**Payment ID:** \`${args.paymentId}\``,
+    `**Crypto:** ${cleanSummaryText(args.crypto)}  `,
+    ...(args.description
+      ? [`**Description:** ${markdownCodeSpan(args.description)}  `]
+      : []),
+    ...sourceLines(args.source),
+    `**Payment ID:** \`${markdownCodeText(args.paymentId)}\``,
     '',
-    `**Pay here:** ${args.payLink}`,
+    `**Pay here:** ${cleanSummaryText(args.payLink)}`,
     '',
-    `_Triggered by @${args.actor}_`,
+    `_Triggered by @${cleanSummaryText(args.actor)}_`,
+    '',
+    handledMarker(args.handledCommentId),
+    paymentMarker(args.idempotencyKey),
+  ].join('\n');
+}
+
+export function dryRunComment(args: {
+  amount: number;
+  fiat: string;
+  crypto: string;
+  wallet: string;
+  description: string;
+  source: PullRequestContext;
+  idempotencyKey: string;
+  handledCommentId: number;
+}): string {
+  return [
+    '### CoinPayPortal invoice preview',
+    '',
+    '**Dry run:** no payment was created and no labels were changed.  ',
+    `**Amount:** ${fmtAmount(args.amount, args.fiat)}  `,
+    `**Crypto:** ${cleanSummaryText(args.crypto)}  `,
+    `**Wallet:** \`${markdownCodeText(args.wallet)}\`  `,
+    `**Description:** ${markdownCodeSpan(args.description)}  `,
+    ...sourceLines(args.source),
+    `**Idempotency key:** \`${args.idempotencyKey}\``,
     '',
     handledMarker(args.handledCommentId),
   ].join('\n');
@@ -89,8 +228,8 @@ export function pendingComment(args: {
   return [
     '### CoinPayPortal invoice request pending approval',
     '',
-    `@${r.requester} requested **${fmtAmount(r.amount, r.fiat)}** in **${r.crypto}** for:`,
-    `> ${r.description ?? '(no description)'}`,
+    `@${cleanSummaryText(r.requester)} requested **${fmtAmount(r.amount, r.fiat)}** in **${cleanSummaryText(r.crypto)}** for:`,
+    `> ${markdownCodeSpan(r.description ?? '(no description)')}`,
     '',
     `A maintainer can approve this with:`,
     `\`${args.approveCommand}\``,
@@ -107,39 +246,46 @@ export function paidComment(args: {
     '### CoinPayPortal payment received',
     '',
     `**Amount:** ${fmtAmount(args.amount, args.fiat)}  `,
-    `**Crypto:** ${args.crypto}  `,
+    `**Crypto:** ${cleanSummaryText(args.crypto)}  `,
     `**Status:** Paid / forwarded  `,
-    `**Payment ID:** \`${args.paymentId}\``,
+    `**Payment ID:** \`${markdownCodeText(args.paymentId)}\``,
     '',
-    `This issue has been labeled \`${args.paidLabel}\`.`,
+    `This issue has been labeled \`${markdownCodeText(args.paidLabel)}\`.`,
   ].join('\n');
 }
 
 export function errorComment(message: string, handledCommentId?: number): string {
-  const lines = ['### CoinPayPortal', '', `:warning: ${message}`];
+  const lines = ['### CoinPayPortal', '', `:warning: ${cleanSummaryText(message)}`];
   if (handledCommentId !== undefined) lines.push('', handledMarker(handledCommentId));
   return lines.join('\n');
 }
 
-export function helpComment(): string {
-  return [
+export function helpComment(handledCommentId?: number): string {
+  const lines = [
     '### CoinPayPortal commands',
     '',
     '| Command | Description |',
     '| --- | --- |',
+    '| `/coinpay create $10 USD --wallet <address>` | On a PR, create an idempotent invoice from the PR and linked issue. |',
     '| `/coinpay invoice <amount> USD --crypto <code> --for "<desc>"` | Create (maintainer) or request (contributor) a payment. |',
     '| `/coinpay approve` | Maintainer: approve the pending request in this thread. |',
     '| `/coinpay status` | Show the current payment status for this thread. |',
     '| `/coinpay cancel` | Maintainer: cancel the pending request in this thread. |',
     '| `/coinpay help` | Show this help. |',
     '',
-    'Example: `/coinpay invoice 250 USD --crypto usdc_pol --for "Milestone 1"`',
-  ].join('\n');
+    'Examples:',
+    '- `/coinpay create $10 USD --wallet <address> --dry-run`',
+    '- `/coinpay invoice 250 USD --crypto usdc_pol --for "Milestone 1"`',
+  ];
+  if (handledCommentId !== undefined) lines.push('', handledMarker(handledCommentId));
+  return lines.join('\n');
 }
 
 /** Build the invoice metadata forwarded to CoinPayPortal (PRD §12.2). */
 export function invoiceMetadata(args: {
   owner: string; repo: string; issueNumber: number; commentId: number; actor: string;
+  idempotencyKey?: string;
+  pullRequest?: PullRequestContext;
 }): Record<string, unknown> {
   return {
     github_owner: args.owner,
@@ -148,6 +294,13 @@ export function invoiceMetadata(args: {
     github_comment_id: args.commentId,
     github_actor: args.actor,
     source: 'coinpaybot',
+    ...(args.idempotencyKey ? { idempotency_key: args.idempotencyKey } : {}),
+    ...(args.pullRequest
+      ? {
+          github_pull_request_url: args.pullRequest.url,
+          github_linked_issues: args.pullRequest.linkedIssues.map((issue) => issue.url),
+        }
+      : {}),
   };
 }
 
