@@ -4,6 +4,8 @@
  * (Org/app dashboard defaults are a hosted-App concern, not the Action MVP.)
  */
 
+import { SUPPORTED_CRYPTO } from './parser.js';
+
 export type MinRole = 'owner' | 'member' | 'collaborator';
 
 export interface LabelConfig {
@@ -54,12 +56,20 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
 
 type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K] };
 
+function resolveDefaultCrypto(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_CONFIG.defaultCrypto;
+  const normalized = value.trim().toLowerCase();
+  return SUPPORTED_CRYPTO.has(normalized)
+    ? normalized
+    : DEFAULT_CONFIG.defaultCrypto;
+}
+
 /** Merge a partial (e.g. parsed YAML) over the product defaults. */
 export function resolveConfig(partial?: DeepPartial<ResolvedConfig> | null): ResolvedConfig {
   if (!partial) return { ...DEFAULT_CONFIG, labels: { ...DEFAULT_LABELS } };
   return {
     enabled: partial.enabled ?? DEFAULT_CONFIG.enabled,
-    defaultCrypto: partial.defaultCrypto ?? DEFAULT_CONFIG.defaultCrypto,
+    defaultCrypto: resolveDefaultCrypto(partial.defaultCrypto),
     defaultFiat: partial.defaultFiat ?? DEFAULT_CONFIG.defaultFiat,
     minRoleToCreateInvoice: partial.minRoleToCreateInvoice ?? DEFAULT_CONFIG.minRoleToCreateInvoice,
     requireApprovalForNonMaintainers:

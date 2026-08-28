@@ -31266,9 +31266,11 @@ var CoinPayClient = class {
     if (input.redirectUrl) body["redirect_url"] = input.redirectUrl;
     if (input.walletAddress) body["merchant_wallet_address"] = input.walletAddress;
     if (input.metadata) body["metadata"] = input.metadata;
+    if (input.idempotencyKey) body["idempotency_key"] = input.idempotencyKey;
     const json = await this.post(
       "/api/payments/create",
-      body
+      body,
+      input.idempotencyKey ? { "Idempotency-Key": input.idempotencyKey } : void 0
     );
     if (!json.success || !json.payment?.id) {
       throw new CoinPayError("BAD_REQUEST", json.error ?? "Payment creation returned no payment", 200);
@@ -31291,20 +31293,21 @@ var CoinPayClient = class {
     const status = json?.payment?.status ?? json?.status ?? "unknown";
     return { status, raw: json };
   }
-  async post(path, body) {
-    const res = await this.call("POST", path, body);
+  async post(path, body, headers) {
+    const res = await this.call("POST", path, body, headers);
     const json = await res.json().catch(() => null);
     if (!res.ok) throw classify(res.status, json);
     if (json === null) throw new CoinPayError("SERVER", "Empty response body", res.status);
     return json;
   }
-  async call(method, path, body) {
+  async call(method, path, body, extraHeaders) {
     try {
       return await this.fetchImpl(`${this.baseUrl}${path}`, {
         method,
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${this.apiKey}`
+          Authorization: `Bearer ${this.apiKey}`,
+          ...extraHeaders
         },
         ...body !== void 0 ? { body: JSON.stringify(body) } : {}
       });
@@ -31316,19 +31319,96 @@ var CoinPayClient = class {
 
 // src/github.ts
 var github = __toESM(require_github(), 1);
+function isTrustedAuthor(comment) {
+  return comment.trustedAuthor === true;
+}
+function linkedIssueCoordinates(body, fallback) {
+  const pattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:(?:https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))|(?:(?:([\w.-]+)\/([\w.-]+))?#(\d+)))/gi;
+  const found = /* @__PURE__ */ new Map();
+  let match;
+  while ((match = pattern.exec(body)) !== null) {
+    const owner = match[1] ?? match[4] ?? fallback.owner;
+    const repo = match[2] ?? match[5] ?? fallback.repo;
+    const number = Number(match[3] ?? match[6]);
+    if (!Number.isSafeInteger(number) || number < 1) continue;
+    found.set(`${owner.toLowerCase()}/${repo.toLowerCase()}#${number}`, {
+      owner,
+      repo,
+      number
+    });
+    if (found.size === 5) break;
+  }
+  return [...found.values()];
+}
 var OctokitGitHubClient = class {
   octokit;
-  constructor(token) {
-    this.octokit = github.getOctokit(token);
+  trustedAuthorLogin;
+  constructor(token, trustedAuthorLogin = "github-actions[bot]", octokit) {
+    this.octokit = octokit ?? github.getOctokit(token);
+    this.trustedAuthorLogin = trustedAuthorLogin.trim().toLowerCase();
   }
-  async listCommentBodies(ref) {
+  async listComments(ref) {
     const comments = await this.octokit.paginate(this.octokit.rest.issues.listComments, {
       owner: ref.owner,
       repo: ref.repo,
       issue_number: ref.issueNumber,
       per_page: 100
     });
-    return comments.map((c) => c.body ?? "");
+    return comments.map((comment) => {
+      const authorLogin = comment.user?.login ?? "";
+      return {
+        body: comment.body ?? "",
+        authorLogin,
+        authorType: comment.user?.type ?? "",
+        trustedAuthor: this.trustedAuthorLogin.length > 0 && authorLogin.toLowerCase() === this.trustedAuthorLogin
+      };
+    });
+  }
+  async getPullRequestContext(ref) {
+    let response;
+    try {
+      response = await this.octokit.rest.pulls.get({
+        owner: ref.owner,
+        repo: ref.repo,
+        pull_number: ref.issueNumber
+      });
+    } catch (error) {
+      const status = error.status;
+      if (status === 404) return null;
+      throw error;
+    }
+    const pull = response.data;
+    const coordinates = linkedIssueCoordinates(pull.body ?? "", ref);
+    const resolvedIssues = await Promise.all(
+      coordinates.map(async (issue) => {
+        try {
+          const result = await this.octokit.rest.issues.get({
+            owner: issue.owner,
+            repo: issue.repo,
+            issue_number: issue.number
+          });
+          return {
+            ...issue,
+            title: result.data.title,
+            url: result.data.html_url
+          };
+        } catch (error) {
+          const status = error.status;
+          if (status === 403 || status === 404 || status === 410) return null;
+          throw error;
+        }
+      })
+    );
+    const linkedIssues = resolvedIssues.filter(
+      (issue) => issue !== null
+    );
+    return {
+      number: pull.number,
+      title: pull.title,
+      url: pull.html_url,
+      author: pull.user?.login ?? "unknown",
+      linkedIssues
+    };
   }
   async createComment(ref, body) {
     await this.octokit.rest.issues.createComment({
@@ -31348,38 +31428,6 @@ var OctokitGitHubClient = class {
     });
   }
 };
-
-// src/config.ts
-var DEFAULT_LABELS = {
-  requested: "coinpay:requested",
-  pending: "coinpay:pending",
-  approved: "coinpay:approved",
-  paid: "coinpay:paid",
-  expired: "coinpay:expired",
-  cancelled: "coinpay:cancelled",
-  error: "coinpay:error"
-};
-var DEFAULT_CONFIG = {
-  enabled: true,
-  defaultCrypto: "usdc_pol",
-  defaultFiat: "USD",
-  minRoleToCreateInvoice: "collaborator",
-  requireApprovalForNonMaintainers: true,
-  labels: { ...DEFAULT_LABELS },
-  commands: { invoice: true, approve: true, status: true, cancel: true }
-};
-function resolveConfig(partial) {
-  if (!partial) return { ...DEFAULT_CONFIG, labels: { ...DEFAULT_LABELS } };
-  return {
-    enabled: partial.enabled ?? DEFAULT_CONFIG.enabled,
-    defaultCrypto: partial.defaultCrypto ?? DEFAULT_CONFIG.defaultCrypto,
-    defaultFiat: partial.defaultFiat ?? DEFAULT_CONFIG.defaultFiat,
-    minRoleToCreateInvoice: partial.minRoleToCreateInvoice ?? DEFAULT_CONFIG.minRoleToCreateInvoice,
-    requireApprovalForNonMaintainers: partial.requireApprovalForNonMaintainers ?? DEFAULT_CONFIG.requireApprovalForNonMaintainers,
-    labels: { ...DEFAULT_LABELS, ...partial.labels ?? {} },
-    commands: { ...DEFAULT_CONFIG.commands, ...partial.commands ?? {} }
-  };
-}
 
 // src/parser.ts
 var SUPPORTED_CRYPTO = /* @__PURE__ */ new Set([
@@ -31402,6 +31450,10 @@ var SUPPORTED_CRYPTO = /* @__PURE__ */ new Set([
   "usdc_sol",
   "usdc_base"
 ]);
+var USD_AMOUNT_RE = /^\d{1,9}(?:\.\d{1,2})?$/;
+function isCanonicalUsdAmount(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && USD_AMOUNT_RE.test(String(value));
+}
 function tokenize(line) {
   const tokens = [];
   const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
@@ -31418,25 +31470,28 @@ function extractCommandLine(body) {
   }
   return null;
 }
-function parseFlags(tokens) {
+function parseFlags(tokens, booleanFlags = /* @__PURE__ */ new Set()) {
   const positionals = [];
   const flags = {};
+  const missingValueFlags = [];
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     if (t.startsWith("--")) {
       const key = t.slice(2);
       const next = tokens[i + 1];
-      if (next !== void 0 && !next.startsWith("--")) {
+      if (booleanFlags.has(key)) {
+        flags[key] = "true";
+      } else if (next !== void 0 && !next.startsWith("--")) {
         flags[key] = next;
         i++;
       } else {
-        flags[key] = "true";
+        missingValueFlags.push(key);
       }
     } else {
       positionals.push(t);
     }
   }
-  return { positionals, flags };
+  return { positionals, flags, missingValueFlags };
 }
 function parseCommand(body) {
   const line = extractCommandLine(body);
@@ -31454,8 +31509,10 @@ function parseCommand(body) {
       return { kind: "status" };
     case "cancel":
       return { kind: "cancel" };
+    case "create":
+      return parseInvoice(tokens.slice(2), "create");
     case "invoice":
-      return parseInvoice(tokens.slice(2));
+      return parseInvoice(tokens.slice(2), "invoice");
     default:
       return {
         kind: "error",
@@ -31464,22 +31521,70 @@ function parseCommand(body) {
       };
   }
 }
-function parseInvoice(args) {
-  const { positionals, flags } = parseFlags(args);
+function parseInvoice(args, source) {
+  const { positionals, flags, missingValueFlags } = parseFlags(
+    args,
+    /* @__PURE__ */ new Set(["dry-run"])
+  );
+  const allowedFlags = source === "create" ? /* @__PURE__ */ new Set(["crypto", "wallet", "dry-run"]) : /* @__PURE__ */ new Set(["crypto", "for", "due", "to", "wallet"]);
+  const unknownFlag = [...Object.keys(flags), ...missingValueFlags].find(
+    (flag) => !allowedFlags.has(flag)
+  );
+  if (unknownFlag) {
+    return {
+      kind: "error",
+      code: "unknown_flag",
+      message: `Unknown flag \`--${unknownFlag}\` for \`/coinpay ${source}\`.`
+    };
+  }
+  if (missingValueFlags.length > 0) {
+    return {
+      kind: "error",
+      code: "missing_flag_value",
+      message: `Flag \`--${missingValueFlags[0]}\` requires a value.`
+    };
+  }
   if (positionals.length === 0) {
     return { kind: "error", code: "missing_amount", message: 'Missing amount. Example: `/coinpay invoice 250 USD --crypto usdc_pol --for "Milestone 1"`' };
   }
-  const amount = Number(positionals[0]);
+  if (positionals.length > 2) {
+    return {
+      kind: "error",
+      code: "bad_arguments",
+      message: `Unexpected positional argument \`${positionals[2]}\`.`
+    };
+  }
+  const amountToken = positionals[0].startsWith("$") ? positionals[0].slice(1) : positionals[0];
+  if (!USD_AMOUNT_RE.test(amountToken)) {
+    return {
+      kind: "error",
+      code: "bad_amount",
+      message: `Invalid amount \`${positionals[0]}\`. Use a positive decimal USD amount with at most two decimal places.`
+    };
+  }
+  const amount = Number(amountToken);
   if (!Number.isFinite(amount) || amount <= 0) {
-    return { kind: "error", code: "bad_amount", message: `Invalid amount \`${positionals[0]}\`. Amount must be a positive number of USD.` };
+    return {
+      kind: "error",
+      code: "bad_amount",
+      message: `Invalid amount \`${positionals[0]}\`. Use a positive decimal USD amount with at most two decimal places.`
+    };
   }
   const fiat = (positionals[1] ?? "USD").toUpperCase();
+  if (fiat !== "USD") {
+    return {
+      kind: "error",
+      code: "bad_fiat",
+      message: `Unsupported fiat \`${fiat}\`. CoinPay GitHub invoices currently support USD only.`
+    };
+  }
   const crypto = flags["crypto"]?.toLowerCase();
   if (crypto !== void 0 && !SUPPORTED_CRYPTO.has(crypto)) {
     return { kind: "error", code: "bad_crypto", message: `Unsupported crypto \`${crypto}\`. Supported: ${[...SUPPORTED_CRYPTO].join(", ")}.` };
   }
   const cmd = {
     kind: "invoice",
+    source,
     amount,
     fiat
   };
@@ -31487,9 +31592,57 @@ function parseInvoice(args) {
   if (flags["for"]) cmd.description = flags["for"];
   if (flags["due"]) cmd.due = flags["due"];
   if (flags["to"]) cmd.to = flags["to"];
-  if (flags["wallet"]) cmd.wallet = flags["wallet"];
+  if (flags["wallet"]?.trim()) cmd.wallet = flags["wallet"].trim();
+  if (source === "create" && !cmd.wallet) {
+    return {
+      kind: "error",
+      code: "missing_wallet",
+      message: "Missing receiving wallet. Use `--wallet <address>`."
+    };
+  }
+  if (flags["dry-run"] === "true") cmd.dryRun = true;
   return cmd;
 }
+
+// src/config.ts
+var DEFAULT_LABELS = {
+  requested: "coinpay:requested",
+  pending: "coinpay:pending",
+  approved: "coinpay:approved",
+  paid: "coinpay:paid",
+  expired: "coinpay:expired",
+  cancelled: "coinpay:cancelled",
+  error: "coinpay:error"
+};
+var DEFAULT_CONFIG = {
+  enabled: true,
+  defaultCrypto: "usdc_pol",
+  defaultFiat: "USD",
+  minRoleToCreateInvoice: "collaborator",
+  requireApprovalForNonMaintainers: true,
+  labels: { ...DEFAULT_LABELS },
+  commands: { invoice: true, approve: true, status: true, cancel: true }
+};
+function resolveDefaultCrypto(value) {
+  if (typeof value !== "string") return DEFAULT_CONFIG.defaultCrypto;
+  const normalized = value.trim().toLowerCase();
+  return SUPPORTED_CRYPTO.has(normalized) ? normalized : DEFAULT_CONFIG.defaultCrypto;
+}
+function resolveConfig(partial) {
+  if (!partial) return { ...DEFAULT_CONFIG, labels: { ...DEFAULT_LABELS } };
+  return {
+    enabled: partial.enabled ?? DEFAULT_CONFIG.enabled,
+    defaultCrypto: resolveDefaultCrypto(partial.defaultCrypto),
+    defaultFiat: partial.defaultFiat ?? DEFAULT_CONFIG.defaultFiat,
+    minRoleToCreateInvoice: partial.minRoleToCreateInvoice ?? DEFAULT_CONFIG.minRoleToCreateInvoice,
+    requireApprovalForNonMaintainers: partial.requireApprovalForNonMaintainers ?? DEFAULT_CONFIG.requireApprovalForNonMaintainers,
+    labels: { ...DEFAULT_LABELS, ...partial.labels ?? {} },
+    commands: { ...DEFAULT_CONFIG.commands, ...partial.commands ?? {} }
+  };
+}
+
+// src/handler.ts
+import { createHash } from "node:crypto";
 
 // src/permissions.ts
 var RANK = {
@@ -31521,11 +31674,16 @@ var canCancel = canApprove;
 // src/render.ts
 var HANDLED_RE = /<!--\s*coinpay:handled\s+(\d+)\s*-->/g;
 var REQUEST_RE = /<!--\s*coinpay:request\s+(\{.*?\})\s*-->/s;
+var REQUEST_V2_RE = /<!--\s*coinpay:request:v2\s+([A-Za-z0-9_-]+)\s*-->/;
+var PAYMENT_RE = /<!--\s*coinpay:payment\s+([a-f0-9]{64})\s*-->/g;
+function trustedBodies(comments) {
+  return comments.filter(isTrustedAuthor).map((comment) => comment.body);
+}
 function handledMarker(commentId) {
   return `<!-- coinpay:handled ${commentId} -->`;
 }
-function isHandled(existingBodies, commentId) {
-  for (const body of existingBodies) {
+function isHandled(comments, commentId) {
+  for (const body of trustedBodies(comments)) {
     HANDLED_RE.lastIndex = 0;
     let m;
     while ((m = HANDLED_RE.exec(body)) !== null) {
@@ -31535,19 +31693,84 @@ function isHandled(existingBodies, commentId) {
   return false;
 }
 function requestMarker(req) {
-  return `<!-- coinpay:request ${JSON.stringify(req)} -->`;
+  const encoded = Buffer.from(JSON.stringify(req), "utf8").toString("base64url");
+  return `<!-- coinpay:request:v2 ${encoded} -->`;
 }
-function findPendingRequest(existingBodies) {
+function findPendingRequest(comments) {
+  const existingBodies = trustedBodies(comments);
   for (let i = existingBodies.length - 1; i >= 0; i--) {
-    const m = REQUEST_RE.exec(existingBodies[i] ?? "");
-    if (m && m[1]) {
+    const body = existingBodies[i] ?? "";
+    const encoded = REQUEST_V2_RE.exec(body)?.[1];
+    const legacy = REQUEST_RE.exec(body)?.[1];
+    if (encoded || legacy) {
       try {
-        return JSON.parse(m[1]);
+        const value = JSON.parse(
+          encoded ? Buffer.from(encoded, "base64url").toString("utf8") : legacy
+        );
+        if (isPendingRequest(value)) return value;
       } catch {
       }
     }
   }
   return null;
+}
+function isPendingRequest(value) {
+  if (!value || typeof value !== "object") return false;
+  const request = value;
+  return isCanonicalUsdAmount(request.amount) && request.fiat === "USD" && typeof request.crypto === "string" && SUPPORTED_CRYPTO.has(request.crypto) && typeof request.requester === "string" && request.requester.trim().length > 0 && Number.isSafeInteger(request.commentId) && request.commentId > 0 && (request.wallet === void 0 || typeof request.wallet === "string") && (request.description === void 0 || typeof request.description === "string");
+}
+function paymentMarker(idempotencyKey) {
+  return `<!-- coinpay:payment ${idempotencyKey} -->`;
+}
+function hasPaymentMarker(comments, idempotencyKey) {
+  for (const body of trustedBodies(comments)) {
+    PAYMENT_RE.lastIndex = 0;
+    let match;
+    while ((match = PAYMENT_RE.exec(body)) !== null) {
+      if (match[1] === idempotencyKey) return true;
+    }
+  }
+  return false;
+}
+function neutralizeHtmlComments(value) {
+  return value.replace(/<!--/g, "&lt;!--").replace(/-->/g, "--&gt;");
+}
+function cleanSummaryText(value) {
+  const flattened = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  return neutralizeHtmlComments(flattened);
+}
+function markdownLinkText(value) {
+  return cleanSummaryText(value).replace(/[\\\[\]]/g, "\\$&");
+}
+function markdownCodeText(value) {
+  return cleanSummaryText(value).replace(/`/g, "&#96;");
+}
+function markdownCodeSpan(value) {
+  const text = cleanSummaryText(value);
+  const longestRun = Math.max(
+    0,
+    ...(text.match(/`+/g) ?? []).map((run2) => run2.length)
+  );
+  const fence = "`".repeat(longestRun + 1);
+  return `${fence} ${text} ${fence}`;
+}
+function pullRequestSummary(context2) {
+  const parts = [`PR #${context2.number}: ${cleanSummaryText(context2.title)}`];
+  for (const issue of context2.linkedIssues) {
+    parts.push(
+      `Issue ${issue.owner}/${issue.repo}#${issue.number}: ${cleanSummaryText(issue.title)}`
+    );
+  }
+  return parts.join(" | ").slice(0, 5e3);
+}
+function sourceLines(context2) {
+  if (!context2) return [];
+  return [
+    `**Work:** [PR #${context2.number}: ${markdownLinkText(context2.title)}](${context2.url})  `,
+    ...context2.linkedIssues.map(
+      (issue) => `**Linked issue:** [${issue.owner}/${issue.repo}#${issue.number}: ${markdownLinkText(issue.title)}](${issue.url})  `
+    )
+  ];
 }
 function fmtAmount(amount, fiat) {
   return `${amount.toFixed(2)} ${fiat}`;
@@ -31557,13 +31780,30 @@ function successComment(args) {
     "### CoinPayPortal invoice created",
     "",
     `**Amount:** ${fmtAmount(args.amount, args.fiat)}  `,
-    `**Crypto:** ${args.crypto}  `,
-    ...args.description ? [`**Description:** ${args.description}  `] : [],
-    `**Payment ID:** \`${args.paymentId}\``,
+    `**Crypto:** ${cleanSummaryText(args.crypto)}  `,
+    ...args.description ? [`**Description:** ${markdownCodeSpan(args.description)}  `] : [],
+    ...sourceLines(args.source),
+    `**Payment ID:** \`${markdownCodeText(args.paymentId)}\``,
     "",
-    `**Pay here:** ${args.payLink}`,
+    `**Pay here:** ${cleanSummaryText(args.payLink)}`,
     "",
-    `_Triggered by @${args.actor}_`,
+    `_Triggered by @${cleanSummaryText(args.actor)}_`,
+    "",
+    handledMarker(args.handledCommentId),
+    paymentMarker(args.idempotencyKey)
+  ].join("\n");
+}
+function dryRunComment(args) {
+  return [
+    "### CoinPayPortal invoice preview",
+    "",
+    "**Dry run:** no payment was created and no labels were changed.  ",
+    `**Amount:** ${fmtAmount(args.amount, args.fiat)}  `,
+    `**Crypto:** ${cleanSummaryText(args.crypto)}  `,
+    `**Wallet:** \`${markdownCodeText(args.wallet)}\`  `,
+    `**Description:** ${markdownCodeSpan(args.description)}  `,
+    ...sourceLines(args.source),
+    `**Idempotency key:** \`${args.idempotencyKey}\``,
     "",
     handledMarker(args.handledCommentId)
   ].join("\n");
@@ -31573,8 +31813,8 @@ function pendingComment(args) {
   return [
     "### CoinPayPortal invoice request pending approval",
     "",
-    `@${r.requester} requested **${fmtAmount(r.amount, r.fiat)}** in **${r.crypto}** for:`,
-    `> ${r.description ?? "(no description)"}`,
+    `@${cleanSummaryText(r.requester)} requested **${fmtAmount(r.amount, r.fiat)}** in **${cleanSummaryText(r.crypto)}** for:`,
+    `> ${markdownCodeSpan(r.description ?? "(no description)")}`,
     "",
     `A maintainer can approve this with:`,
     `\`${args.approveCommand}\``,
@@ -31584,24 +31824,29 @@ function pendingComment(args) {
   ].join("\n");
 }
 function errorComment(message, handledCommentId) {
-  const lines = ["### CoinPayPortal", "", `:warning: ${message}`];
+  const lines = ["### CoinPayPortal", "", `:warning: ${cleanSummaryText(message)}`];
   if (handledCommentId !== void 0) lines.push("", handledMarker(handledCommentId));
   return lines.join("\n");
 }
-function helpComment() {
-  return [
+function helpComment(handledCommentId) {
+  const lines = [
     "### CoinPayPortal commands",
     "",
     "| Command | Description |",
     "| --- | --- |",
+    "| `/coinpay create $10 USD --wallet <address>` | On a PR, create an idempotent invoice from the PR and linked issue. |",
     '| `/coinpay invoice <amount> USD --crypto <code> --for "<desc>"` | Create (maintainer) or request (contributor) a payment. |',
     "| `/coinpay approve` | Maintainer: approve the pending request in this thread. |",
     "| `/coinpay status` | Show the current payment status for this thread. |",
     "| `/coinpay cancel` | Maintainer: cancel the pending request in this thread. |",
     "| `/coinpay help` | Show this help. |",
     "",
-    'Example: `/coinpay invoice 250 USD --crypto usdc_pol --for "Milestone 1"`'
-  ].join("\n");
+    "Examples:",
+    "- `/coinpay create $10 USD --wallet <address> --dry-run`",
+    '- `/coinpay invoice 250 USD --crypto usdc_pol --for "Milestone 1"`'
+  ];
+  if (handledCommentId !== void 0) lines.push("", handledMarker(handledCommentId));
+  return lines.join("\n");
 }
 function invoiceMetadata(args) {
   return {
@@ -31610,7 +31855,12 @@ function invoiceMetadata(args) {
     github_issue_number: args.issueNumber,
     github_comment_id: args.commentId,
     github_actor: args.actor,
-    source: "coinpaybot"
+    source: "coinpaybot",
+    ...args.idempotencyKey ? { idempotency_key: args.idempotencyKey } : {},
+    ...args.pullRequest ? {
+      github_pull_request_url: args.pullRequest.url,
+      github_linked_issues: args.pullRequest.linkedIssues.map((issue) => issue.url)
+    } : {}
   };
 }
 
@@ -31623,7 +31873,7 @@ async function handleComment(evt, deps) {
   if (!deps.config.enabled) {
     return { action: "noop_disabled" };
   }
-  const existing = await deps.github.listCommentBodies(evt.ref);
+  const existing = await deps.github.listComments(evt.ref);
   if (isHandled(existing, evt.commentId)) {
     return { action: "noop_duplicate" };
   }
@@ -31633,7 +31883,7 @@ async function handleComment(evt, deps) {
   }
   switch (parsed.kind) {
     case "help":
-      await deps.github.createComment(evt.ref, helpComment());
+      await deps.github.createComment(evt.ref, helpComment(evt.commentId));
       return { action: "help" };
     case "invoice":
       return handleInvoice(parsed, evt, deps, existing);
@@ -31645,13 +31895,99 @@ async function handleComment(evt, deps) {
       return handleCancel(evt, deps, existing);
   }
 }
-async function handleInvoice(cmd, evt, deps, _existing) {
+async function handleInvoice(cmd, evt, deps, existing) {
   if (!deps.config.commands.invoice) {
     await deps.github.createComment(evt.ref, errorComment("The `invoice` command is disabled for this repository.", evt.commentId));
     return { action: "error", detail: "command_disabled" };
   }
   const crypto = cmd.crypto ?? deps.config.defaultCrypto;
   const direct = canCreateDirectly(evt.authorAssociation, deps.config.minRoleToCreateInvoice);
+  if (cmd.source === "create" && !direct) {
+    await deps.github.createComment(
+      evt.ref,
+      errorComment(
+        "Only a repository maintainer may create a PR-backed invoice directly.",
+        evt.commentId
+      )
+    );
+    return { action: "error", detail: "unauthorized_create" };
+  }
+  if (cmd.wallet && !direct) {
+    await deps.github.createComment(
+      evt.ref,
+      errorComment(
+        "Only a repository maintainer may supply an explicit receiving wallet. Ask a maintainer to run the command directly.",
+        evt.commentId
+      )
+    );
+    return { action: "error", detail: "unauthorized_wallet" };
+  }
+  if (cmd.source === "create") {
+    if (!evt.isPullRequest) {
+      await deps.github.createComment(
+        evt.ref,
+        errorComment("`/coinpay create` must be run on a pull request.", evt.commentId)
+      );
+      return { action: "error", detail: "not_a_pull_request" };
+    }
+    let pullRequest;
+    try {
+      pullRequest = await deps.github.getPullRequestContext(evt.ref);
+    } catch {
+      await deps.github.createComment(
+        evt.ref,
+        errorComment(
+          "Could not read this pull request and its linked issues. Check the Action permissions and try again."
+        )
+      );
+      return { action: "error", detail: "github_read_failed" };
+    }
+    if (!pullRequest) {
+      await deps.github.createComment(
+        evt.ref,
+        errorComment("Could not resolve this pull request.", evt.commentId)
+      );
+      return { action: "error", detail: "pull_request_not_found" };
+    }
+    const description = pullRequestSummary(pullRequest);
+    const request = {
+      amount: cmd.amount,
+      fiat: cmd.fiat,
+      crypto,
+      description,
+      wallet: cmd.wallet,
+      requester: evt.actor,
+      commentId: evt.commentId
+    };
+    const idempotencyKey = paymentIdempotencyKey(evt.ref, request);
+    if (hasPaymentMarker(existing, idempotencyKey)) {
+      return { action: "noop_duplicate" };
+    }
+    if (cmd.dryRun) {
+      await deps.github.createComment(
+        evt.ref,
+        dryRunComment({
+          amount: request.amount,
+          fiat: request.fiat,
+          crypto: request.crypto,
+          wallet: request.wallet,
+          description,
+          source: pullRequest,
+          idempotencyKey,
+          handledCommentId: evt.commentId
+        })
+      );
+      return { action: "dry_run" };
+    }
+    return createPaymentAndReply(
+      request,
+      evt,
+      deps,
+      existing,
+      pullRequest,
+      idempotencyKey
+    );
+  }
   if (!direct && deps.config.requireApprovalForNonMaintainers) {
     const req = {
       amount: cmd.amount,
@@ -31680,7 +32016,8 @@ async function handleInvoice(cmd, evt, deps, _existing) {
       commentId: evt.commentId
     },
     evt,
-    deps
+    deps,
+    existing
   );
 }
 async function handleApprove(evt, deps, existing) {
@@ -31693,8 +32030,18 @@ async function handleApprove(evt, deps, existing) {
     await deps.github.createComment(evt.ref, errorComment("No pending invoice request found in this thread.", evt.commentId));
     return { action: "error", detail: "no_pending_request" };
   }
+  if (req.wallet) {
+    await deps.github.createComment(
+      evt.ref,
+      errorComment(
+        "A pending contributor request cannot select a receiving wallet. Run a new maintainer-authored invoice command instead.",
+        evt.commentId
+      )
+    );
+    return { action: "error", detail: "untrusted_pending_wallet" };
+  }
   await deps.github.addLabels(evt.ref, [deps.config.labels.approved]);
-  return createPaymentAndReply(req, evt, deps);
+  return createPaymentAndReply(req, evt, deps, existing);
 }
 async function handleStatus(evt, deps, _existing) {
   await deps.github.createComment(
@@ -31717,7 +32064,11 @@ async function handleCancel(evt, deps, existing) {
   await deps.github.createComment(evt.ref, errorComment(`Pending request from @${req.requester} cancelled.`, evt.commentId));
   return { action: "cancelled" };
 }
-async function createPaymentAndReply(req, evt, deps) {
+async function createPaymentAndReply(req, evt, deps, existing, pullRequest, requestedIdempotencyKey) {
+  const idempotencyKey = requestedIdempotencyKey ?? legacyPaymentIdempotencyKey(evt.ref, req);
+  if (hasPaymentMarker(existing, idempotencyKey)) {
+    return { action: "noop_duplicate" };
+  }
   try {
     const result = await deps.coinpay.createPayment({
       amountUsd: req.amount,
@@ -31725,12 +32076,15 @@ async function createPaymentAndReply(req, evt, deps) {
       description: req.description,
       redirectUrl: evt.issueUrl,
       walletAddress: req.wallet,
+      idempotencyKey,
       metadata: invoiceMetadata({
         owner: evt.ref.owner,
         repo: evt.ref.repo,
         issueNumber: evt.ref.issueNumber,
         commentId: req.commentId,
-        actor: req.requester
+        actor: req.requester,
+        idempotencyKey,
+        pullRequest
       })
     });
     await deps.github.createComment(
@@ -31743,17 +32097,46 @@ async function createPaymentAndReply(req, evt, deps) {
         paymentId: result.paymentId,
         payLink: result.payLink,
         actor: req.requester,
-        handledCommentId: evt.commentId
+        handledCommentId: evt.commentId,
+        idempotencyKey,
+        source: pullRequest
       })
     );
     await deps.github.addLabels(evt.ref, [deps.config.labels.pending]);
     return { action: "invoice_created", paymentId: result.paymentId };
   } catch (err) {
     const msg = friendlyError(err);
-    await deps.github.createComment(evt.ref, errorComment(msg, evt.commentId));
+    await deps.github.createComment(evt.ref, errorComment(msg));
     await deps.github.addLabels(evt.ref, [deps.config.labels.error]);
     return { action: "error", detail: err instanceof CoinPayError ? err.code : "unknown" };
   }
+}
+function legacyPaymentIdempotencyKey(ref, request) {
+  return hashPaymentIdentity([
+    ref.owner.toLowerCase(),
+    ref.repo.toLowerCase(),
+    String(ref.issueNumber),
+    String(request.commentId),
+    request.amount.toString(),
+    request.fiat.toUpperCase(),
+    request.crypto.toLowerCase(),
+    request.wallet?.trim() ?? ""
+  ]);
+}
+function paymentIdempotencyKey(ref, request) {
+  const identity = [
+    ref.owner.toLowerCase(),
+    ref.repo.toLowerCase(),
+    String(ref.issueNumber),
+    request.amount.toString(),
+    request.fiat.toUpperCase(),
+    request.crypto.toLowerCase(),
+    request.wallet?.trim() ?? ""
+  ];
+  return hashPaymentIdentity(identity);
+}
+function hashPaymentIdentity(identity) {
+  return createHash("sha256").update(JSON.stringify(identity)).digest("hex");
 }
 function friendlyError(err) {
   if (err instanceof CoinPayError) {
@@ -31769,7 +32152,7 @@ function friendlyError(err) {
       case "NETWORK":
         return "Could not reach CoinPayPortal. Please try again.";
       default:
-        return `CoinPayPortal could not create the payment: ${err.message}`;
+        return "CoinPayPortal could not create the payment. Check the service logs and try again.";
     }
   }
   return "An unexpected error occurred while creating the payment.";
@@ -31808,12 +32191,13 @@ async function run() {
   const apiKey = core.getInput("coinpay-api-key", { required: true });
   const businessId = core.getInput("coinpay-business-id", { required: true });
   const baseUrl = core.getInput("coinpay-base-url") || "https://coinpayportal.com";
+  const trustedCommentAuthor = core.getInput("trusted-comment-author") || "github-actions[bot]";
   const ref = {
     owner: github2.context.repo.owner,
     repo: github2.context.repo.repo,
     issueNumber: payload.issue.number
   };
-  const gh = new OctokitGitHubClient(token);
+  const gh = new OctokitGitHubClient(token, trustedCommentAuthor);
   const config = await loadRepoConfig(gh, token, ref);
   const coinpay = new CoinPayClient({ baseUrl, apiKey, businessId });
   const evt = {
@@ -31822,7 +32206,8 @@ async function run() {
     body: payload.comment.body ?? "",
     actor: payload.comment.user?.login ?? "unknown",
     authorAssociation: payload.comment.author_association ?? "NONE",
-    issueUrl: payload.issue.html_url ?? ""
+    issueUrl: payload.issue.html_url ?? "",
+    isPullRequest: payload.issue.pull_request !== void 0
   };
   const result = await handleComment(evt, { coinpay, github: gh, config });
   core.info(`coinpaybot action=${result.action}${result.detail ? ` detail=${result.detail}` : ""}`);

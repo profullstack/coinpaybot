@@ -7,13 +7,14 @@ on:
     types: [created]
 
 permissions:
+  contents: read
   issues: write
   pull-requests: write
 
 jobs:
   coinpay:
     # Only spin up when a comment actually invokes the bot.
-    if: startsWith(github.event.comment.body, '/coinpay')
+    if: contains(github.event.comment.body, '/coinpay')
     runs-on: ubuntu-latest
     steps:
       - uses: profullstack/coinpaybot@v0
@@ -22,3 +23,4 @@ jobs:
           coinpay-api-key: ${{ secrets.COINPAY_API_KEY }}
           coinpay-business-id: ${{ secrets.COINPAY_BUSINESS_ID }}
           # coinpay-base-url: https://coinpayportal.com  # optional
+          # trusted-comment-author: github-actions[bot]  # change only for a custom token

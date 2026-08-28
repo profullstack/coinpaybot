@@ -19,6 +19,10 @@ inputs:
     description: 'CoinPayPortal base URL.'
     required: false
     default: 'https://coinpayportal.com'
+  trusted-comment-author:
+    description: 'Exact GitHub login whose Action comments may supply hidden state markers.'
+    required: false
+    default: 'github-actions[bot]'
 outputs:
   action:
     description: 'What the bot did (invoice_created, request_pending, help, error, ...).'
