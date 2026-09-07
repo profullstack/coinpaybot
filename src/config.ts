@@ -4,9 +4,23 @@
  * (Org/app dashboard defaults are a hosted-App concern, not the Action MVP.)
  */
 
-import { SUPPORTED_CRYPTO } from './parser.js';
+import { isCanonicalUsdAmount, SUPPORTED_CRYPTO } from './parser.js';
 
 export type MinRole = 'owner' | 'member' | 'collaborator';
+
+/**
+ * `/coinpay create @payer ...` — publish a real CoinPayPortal invoice from a
+ * comment. Ships disabled: enabling it requires the CoinPayPortal idempotent
+ * invoice-creation deployment (API + migration) to be live first, otherwise
+ * every command fails with a 503.
+ */
+export interface GithubInvoiceConfig {
+  enabled: boolean;
+  /** Upper bound for a single invoice in USD. */
+  maxAmountUsd: number;
+  /** Per-repository hourly invoice cap enforced atomically by CoinPayPortal (1-1000). */
+  repositoryHourlyCap: number;
+}
 
 export interface LabelConfig {
   requested: string;
@@ -26,6 +40,7 @@ export interface ResolvedConfig {
   minRoleToCreateInvoice: MinRole;
   requireApprovalForNonMaintainers: boolean;
   labels: LabelConfig;
+  githubInvoices: GithubInvoiceConfig;
   commands: {
     invoice: boolean;
     approve: boolean;
@@ -44,6 +59,12 @@ export const DEFAULT_LABELS: LabelConfig = {
   error: 'coinpay:error',
 };
 
+export const DEFAULT_GITHUB_INVOICES: GithubInvoiceConfig = {
+  enabled: false,
+  maxAmountUsd: 1000,
+  repositoryHourlyCap: 20,
+};
+
 export const DEFAULT_CONFIG: ResolvedConfig = {
   enabled: true,
   defaultCrypto: 'usdc_pol',
@@ -51,6 +72,7 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
   minRoleToCreateInvoice: 'collaborator',
   requireApprovalForNonMaintainers: true,
   labels: { ...DEFAULT_LABELS },
+  githubInvoices: { ...DEFAULT_GITHUB_INVOICES },
   commands: { invoice: true, approve: true, status: true, cancel: true },
 };
 
@@ -64,9 +86,33 @@ function resolveDefaultCrypto(value: unknown): string {
     : DEFAULT_CONFIG.defaultCrypto;
 }
 
+/**
+ * Money movement gates fail closed: the flag enables only on a literal boolean
+ * `true`, and out-of-range or non-numeric limits fall back to the defaults
+ * rather than widening. The cap mirrors the API's accepted range (1-1000).
+ */
+function resolveGithubInvoices(value: unknown): GithubInvoiceConfig {
+  const raw = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+  const maxAmountUsd = isCanonicalUsdAmount(raw['maxAmountUsd'])
+    ? raw['maxAmountUsd']
+    : DEFAULT_GITHUB_INVOICES.maxAmountUsd;
+  const cap = raw['repositoryHourlyCap'];
+  const repositoryHourlyCap =
+    typeof cap === 'number' && Number.isSafeInteger(cap) && cap >= 1 && cap <= 1000
+      ? cap
+      : DEFAULT_GITHUB_INVOICES.repositoryHourlyCap;
+  return { enabled: raw['enabled'] === true, maxAmountUsd, repositoryHourlyCap };
+}
+
 /** Merge a partial (e.g. parsed YAML) over the product defaults. */
 export function resolveConfig(partial?: DeepPartial<ResolvedConfig> | null): ResolvedConfig {
-  if (!partial) return { ...DEFAULT_CONFIG, labels: { ...DEFAULT_LABELS } };
+  if (!partial) {
+    return {
+      ...DEFAULT_CONFIG,
+      labels: { ...DEFAULT_LABELS },
+      githubInvoices: { ...DEFAULT_GITHUB_INVOICES },
+    };
+  }
   return {
     enabled: partial.enabled ?? DEFAULT_CONFIG.enabled,
     defaultCrypto: resolveDefaultCrypto(partial.defaultCrypto),
@@ -75,6 +121,7 @@ export function resolveConfig(partial?: DeepPartial<ResolvedConfig> | null): Res
     requireApprovalForNonMaintainers:
       partial.requireApprovalForNonMaintainers ?? DEFAULT_CONFIG.requireApprovalForNonMaintainers,
     labels: { ...DEFAULT_LABELS, ...(partial.labels ?? {}) },
+    githubInvoices: resolveGithubInvoices(partial.githubInvoices),
     commands: { ...DEFAULT_CONFIG.commands, ...(partial.commands ?? {}) },
   };
 }

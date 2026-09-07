@@ -13,8 +13,8 @@ import type {
   ThreadComment,
 } from './github.js';
 import { CoinPayClient, CoinPayError } from './coinpay.js';
-import { parseCommand } from './parser.js';
-import type { InvoiceCommand } from './parser.js';
+import { isValidGithubLogin, parseCommand } from './parser.js';
+import type { InvoiceCommand, PublishInvoiceCommand } from './parser.js';
 import { canCreateDirectly, canApprove, canCancel } from './permissions.js';
 import type { AuthorAssociation } from './permissions.js';
 import * as render from './render.js';
@@ -22,9 +22,15 @@ import type { PendingRequest } from './render.js';
 
 export interface CommentEvent {
   ref: IssueRef;
+  /** Immutable repository id, independent of renames and transfers. */
+  repositoryId?: number;
   commentId: number;
   body: string;
   actor: string;
+  /** Immutable numeric GitHub user id of the comment author (audit identity). */
+  actorId?: number;
+  /** GitHub account type of the comment author: 'User', 'Bot', ... */
+  actorType?: string;
   authorAssociation: AuthorAssociation;
   /** Canonical URL of the issue/PR, used as the payer redirect target. */
   issueUrl: string;
@@ -41,6 +47,8 @@ export type Action =
   | 'skipped'
   | 'help'
   | 'invoice_created'
+  | 'invoice_published'
+  | 'invoice_already_closed'
   | 'dry_run'
   | 'request_pending'
   | 'approved'
@@ -54,6 +62,7 @@ export interface HandlerResult {
   action: Action;
   detail?: string;
   paymentId?: string;
+  invoiceId?: string;
 }
 
 export async function handleComment(evt: CommentEvent, deps: HandlerDeps): Promise<HandlerResult> {
@@ -72,6 +81,11 @@ export async function handleComment(evt: CommentEvent, deps: HandlerDeps): Promi
   }
 
   if (parsed.kind === 'error') {
+    // The @payer invoice flow never replies to non-human commenters, even
+    // with usage errors, so misfiring integrations cannot start reply loops.
+    if (parsed.flow === 'publish_invoice' && !isHumanActor(evt)) {
+      return { action: 'skipped', detail: 'non_human_commenter' };
+    }
     await deps.github.createComment(evt.ref, render.errorComment(parsed.message, evt.commentId));
     return { action: 'error', detail: parsed.code };
   }
@@ -82,6 +96,8 @@ export async function handleComment(evt: CommentEvent, deps: HandlerDeps): Promi
       return { action: 'help' };
     case 'invoice':
       return handleInvoice(parsed, evt, deps, existing);
+    case 'publish_invoice':
+      return handlePublishInvoice(parsed, evt, deps);
     case 'approve':
       return handleApprove(evt, deps, existing);
     case 'status':
@@ -89,6 +105,11 @@ export async function handleComment(evt: CommentEvent, deps: HandlerDeps): Promi
     case 'cancel':
       return handleCancel(evt, deps, existing);
   }
+}
+
+/** GitHub `user.type` for humans is exactly 'User'; anything else fails closed. */
+function isHumanActor(evt: CommentEvent): boolean {
+  return (evt.actorType ?? '').toLowerCase() === 'user';
 }
 
 async function handleInvoice(
@@ -231,6 +252,212 @@ async function handleInvoice(
     deps,
     existing,
   );
+}
+
+/**
+ * Stable invoice identity for CoinPayPortal's `Idempotency-Key`: repository ID +
+ * comment id ONLY. It survives process restarts and redeliveries because it is
+ * derived, not stored — and it deliberately excludes the terms, so a key reuse
+ * with different terms is rejected by the API (409) instead of silently
+ * creating a second invoice.
+ */
+export function githubInvoiceIdempotencyKey(repositoryId: number, commentId: number): string {
+  return `github:repository:${repositoryId}:comment:${commentId}`;
+}
+
+function canonicalThreadUrl(ref: IssueRef, isPullRequest: boolean): string {
+  return `https://github.com/${ref.owner}/${ref.repo}/${isPullRequest ? 'pull' : 'issues'}/${ref.issueNumber}`;
+}
+
+/**
+ * `/coinpay create @payer <amount> "<description>"` — create and publish a
+ * CoinPayPortal invoice issued by the repository's configured business.
+ *
+ * Open to every human commenter by design (no role gate): the safeguards are
+ * non-identity ones — the feature flag, the per-invoice amount cap, the
+ * portal-enforced per-repository hourly cap, strict parsing, and one invoice
+ * per source comment via API idempotency. The commenter's own CoinPay account
+ * is never involved; no GitHub-to-CoinPay account mapping exists.
+ */
+async function handlePublishInvoice(
+  cmd: PublishInvoiceCommand,
+  evt: CommentEvent,
+  deps: HandlerDeps,
+): Promise<HandlerResult> {
+  // Only human-authored, newly created comments qualify; the Action entrypoint
+  // already drops edited comments, and bots are dropped here without a reply.
+  if (!isHumanActor(evt)) {
+    return { action: 'skipped', detail: 'non_human_commenter' };
+  }
+
+  const settings = deps.config.githubInvoices;
+  if (!settings.enabled) {
+    await deps.github.createComment(
+      evt.ref,
+      render.errorComment(
+        'The `/coinpay create @payer …` invoice command is not enabled for this repository. A maintainer can enable it by setting `githubInvoices.enabled: true` in `.github/coinpay.yml` — but only after the CoinPayPortal idempotent invoice deployment (API + migration) is live, or every command will fail.',
+        evt.commentId,
+      ),
+    );
+    return { action: 'noop_disabled', detail: 'github_invoices_disabled' };
+  }
+
+  // The immutable numeric actor id is mandatory audit data; fail closed
+  // rather than record an invoice that cannot be attributed.
+  if (!Number.isSafeInteger(evt.actorId) || evt.actorId! <= 0 || !isValidGithubLogin(evt.actor)
+      || !Number.isSafeInteger(evt.repositoryId) || evt.repositoryId! <= 0
+      || !Number.isSafeInteger(evt.commentId) || evt.commentId <= 0) {
+    await deps.github.createComment(
+      evt.ref,
+      render.errorComment(
+        'Could not verify the GitHub actor, repository, and comment identities, so no invoice was created.',
+        evt.commentId,
+      ),
+    );
+    return { action: 'error', detail: 'missing_actor_identity' };
+  }
+
+  if (cmd.amount > settings.maxAmountUsd) {
+    await deps.github.createComment(
+      evt.ref,
+      render.errorComment(
+        `The amount ${cmd.amount.toFixed(2)} USD exceeds this repository’s per-invoice maximum of ${settings.maxAmountUsd.toFixed(2)} USD (config: \`githubInvoices.maxAmountUsd\`).`,
+        evt.commentId,
+      ),
+    );
+    return { action: 'error', detail: 'amount_over_limit' };
+  }
+
+  const threadUrl = canonicalThreadUrl(evt.ref, evt.isPullRequest);
+  const threadLabel = `${evt.ref.owner}/${evt.ref.repo}#${evt.ref.issueNumber}`;
+  const idempotencyKey = githubInvoiceIdempotencyKey(evt.repositoryId!, evt.commentId);
+
+  if (cmd.dryRun) {
+    await deps.github.createComment(
+      evt.ref,
+      render.githubInvoiceDryRunComment({
+        payer: cmd.payer,
+        amount: cmd.amount,
+        description: cmd.description,
+        crypto: deps.config.defaultCrypto,
+        threadUrl,
+        threadLabel,
+        idempotencyKey,
+        handledCommentId: evt.commentId,
+      }),
+    );
+    return { action: 'dry_run' };
+  }
+
+  try {
+    const created = await deps.coinpay.createInvoice({
+      amountUsd: cmd.amount,
+      cryptoCurrency: deps.config.defaultCrypto,
+      // Stable notes: sanitized description + canonical thread/comment URL.
+      notes: `${cmd.description}\n\n${threadUrl}#issuecomment-${evt.commentId}`,
+      source: {
+        repository: `${evt.ref.owner}/${evt.ref.repo}`,
+        threadNumber: evt.ref.issueNumber,
+        commentId: evt.commentId,
+        actorId: evt.actorId!,
+        actorLogin: evt.actor,
+        payerLogin: cmd.payer,
+      },
+      sourceRateLimit: settings.repositoryHourlyCap,
+      idempotencyKey,
+    });
+
+    // A replayed invoice may have closed since (paid/cancelled/...): report
+    // it, never republish it, and never post a payment link for it.
+    if (created.status !== 'draft' && created.status !== 'sent') {
+      await deps.github.createComment(
+        evt.ref,
+        render.githubInvoiceExistsComment({
+          invoiceNumber: created.invoiceNumber,
+          status: created.status,
+          handledCommentId: evt.commentId,
+        }),
+      );
+      return { action: 'invoice_already_closed', detail: created.status, invoiceId: created.invoiceId };
+    }
+
+    // Publish is idempotent for draft and sent; the adapter refuses to return
+    // until the row is verified sent with a payment address for OUR business.
+    const published = await deps.coinpay.publishInvoice(created.invoiceId, {
+      amountUsd: cmd.amount,
+    });
+
+    // Re-check the thread before posting: another delivery may have published
+    // and replied while we were talking to CoinPayPortal. Best effort only —
+    // GitHub offers no atomic reservation, so a duplicate comment remains
+    // possible; the invoice itself stays unique through the idempotency key.
+    const latest = await deps.github.listComments(evt.ref);
+    if (render.isHandled(latest, evt.commentId)) {
+      return { action: 'noop_duplicate', invoiceId: created.invoiceId };
+    }
+
+    await deps.github.createComment(
+      evt.ref,
+      render.githubInvoiceSuccessComment({
+        payer: cmd.payer,
+        actor: evt.actor,
+        amount: cmd.amount,
+        description: cmd.description,
+        invoiceNumber: published.invoiceNumber,
+        paymentLink: published.paymentLink,
+        feeRate: published.feeRate,
+        feeAmountUsd: published.feeAmountUsd,
+        threadUrl,
+        threadLabel,
+        handledCommentId: evt.commentId,
+      }),
+    );
+    await deps.github.addLabels(evt.ref, [deps.config.labels.pending]);
+    return { action: 'invoice_published', invoiceId: created.invoiceId };
+  } catch (err) {
+    // No fallback path: a failed invoice flow never falls through to the
+    // legacy payment API. The comment carries fixed text only — raw API
+    // errors, keys, and addresses are not printed in the Action log either.
+    await deps.github.createComment(evt.ref, render.errorComment(friendlyInvoiceError(err)));
+    await deps.github.addLabels(evt.ref, [deps.config.labels.error]);
+    return { action: 'error', detail: err instanceof CoinPayError ? err.code : 'unknown' };
+  }
+}
+
+/** Fixed, safe comment text per invoice-flow failure mode. Never raw API text. */
+export function friendlyInvoiceError(err: unknown): string {
+  const retry = 'Ask a maintainer to re-run this same GitHub Actions run, not post a new command comment. Only the same source comment reuses the invoice.';
+  if (err instanceof CoinPayError) {
+    switch (err.code) {
+      case 'NO_WALLET':
+        return 'The repository’s CoinPayPortal business has no receiving wallet for the configured crypto. A maintainer can add one in CoinPayPortal settings. ' + retry;
+      case 'AUTH':
+        return 'CoinPayPortal rejected the API key. Check the `COINPAY_API_KEY` secret for this repository.';
+      case 'BAD_REQUEST':
+        return 'CoinPayPortal rejected the invoice terms or configuration. A maintainer should check the command, business settings, and existing invoice before trying again. Re-running an unchanged invalid request will not fix it. No payment link was posted.';
+      case 'RATE_LIMIT':
+        return 'This repository’s hourly invoice cap has been reached. Wait for the window to pass. ' + retry;
+      case 'IDEMPOTENCY_CONFLICT':
+        return 'An invoice was already recorded for this comment with different terms, so no new invoice was created. Check the existing invoice in CoinPayPortal before requesting a replacement.';
+      case 'INVOICE_DELETED':
+        return 'The invoice originally created from this comment was deleted in CoinPayPortal and will not be recreated automatically. Post a new comment if payment is still owed.';
+      case 'UNAVAILABLE':
+        return 'CoinPayPortal cannot confirm idempotent invoice creation right now (the deployment or migration may still be rolling out). ' + retry;
+      case 'PUBLISH_RETRY':
+        return 'The invoice exists but its payment details are still being prepared. ' + retry;
+      case 'NOT_PUBLISHABLE':
+        return 'The invoice created from this comment is already closed and stays closed. No payment link was posted.';
+      case 'INVALID_RESPONSE':
+        return 'CoinPayPortal returned an unexpected response, so no payment link was posted. ' + retry;
+      case 'NETWORK':
+        return 'Could not reach CoinPayPortal; creation may have completed before the connection failed. ' + retry;
+      case 'SERVER':
+        return 'CoinPayPortal had an internal error. ' + retry;
+      default:
+        return 'CoinPayPortal could not confirm invoice creation. ' + retry;
+    }
+  }
+  return 'An unexpected error occurred during invoice creation or reply delivery. ' + retry;
 }
 
 async function handleApprove(evt: CommentEvent, deps: HandlerDeps, existing: ThreadComment[]): Promise<HandlerResult> {

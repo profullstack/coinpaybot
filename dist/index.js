@@ -31240,6 +31240,76 @@ function classify(status, body) {
   }
   return new CoinPayError("BAD_REQUEST", msg, status);
 }
+function classifyInvoice(status, body) {
+  const msg = body?.error ?? `HTTP ${status}`;
+  const code = body?.code;
+  if (status === 401 || status === 403) return new CoinPayError("AUTH", msg, status);
+  if (status === 409) {
+    return code === "IDEMPOTENCY_CONFLICT" ? new CoinPayError("IDEMPOTENCY_CONFLICT", msg, status) : new CoinPayError("PUBLISH_RETRY", msg, status);
+  }
+  if (status === 410) return new CoinPayError("INVOICE_DELETED", msg, status);
+  if (status === 429) return new CoinPayError("RATE_LIMIT", msg, status);
+  if (status === 503) return new CoinPayError("UNAVAILABLE", msg, status);
+  if (status >= 500) return new CoinPayError("SERVER", msg, status);
+  if (status === 400) {
+    if (code === "INVOICE_NOT_PUBLISHABLE" || code === "INVOICE_NOT_ACTIVATABLE") {
+      return new CoinPayError("NOT_PUBLISHABLE", msg, status);
+    }
+    if (code === "PAYEE_REQUIRED" || code === "PAYEE_INVALID" || code === "CRYPTO_REQUIRED" || /no .*wallet configured/i.test(msg)) {
+      return new CoinPayError("NO_WALLET", msg, status);
+    }
+    return new CoinPayError("BAD_REQUEST", msg, status);
+  }
+  return new CoinPayError("BAD_REQUEST", msg, status);
+}
+var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function invalidResponse(detail) {
+  return new CoinPayError("INVALID_RESPONSE", `Malformed CoinPayPortal invoice response: ${detail}`, 200);
+}
+function usdCents(value) {
+  const n = decimalNumber(value);
+  const cents = Math.round(n * 100);
+  return Number.isSafeInteger(cents) && n === cents / 100 ? cents : Number.NaN;
+}
+function decimalNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : Number.NaN;
+  if (typeof value !== "string" || !/^\d+(?:\.\d+)?$/.test(value)) return Number.NaN;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : Number.NaN;
+}
+function parseInvoiceSummary(invoice, expected) {
+  if (!invoice || typeof invoice !== "object") throw invalidResponse("missing invoice");
+  const row = invoice;
+  if (typeof row["id"] !== "string" || !UUID_RE.test(row["id"])) {
+    throw invalidResponse("invoice id is not a UUID");
+  }
+  if (row["business_id"] !== expected.businessId) {
+    throw invalidResponse("invoice belongs to a different business");
+  }
+  if (row["currency"] !== "USD") throw invalidResponse("invoice currency is not USD");
+  if (usdCents(row["amount"]) !== usdCents(expected.amountUsd)) {
+    throw invalidResponse("invoice amount differs from the requested amount");
+  }
+  if (typeof row["invoice_number"] !== "string" || row["invoice_number"].trim() === "") {
+    throw invalidResponse("invoice number missing");
+  }
+  if (typeof row["status"] !== "string" || row["status"] === "") {
+    throw invalidResponse("invoice status missing");
+  }
+  let feeRate = null;
+  if (row["fee_rate"] !== null && row["fee_rate"] !== void 0) {
+    feeRate = decimalNumber(row["fee_rate"]);
+    if (!Number.isFinite(feeRate) || feeRate < 0 || feeRate > 1) throw invalidResponse("invalid fee rate");
+  }
+  return {
+    invoiceId: row["id"],
+    invoiceNumber: row["invoice_number"],
+    status: row["status"],
+    amountUsd: expected.amountUsd,
+    currency: "USD",
+    feeRate
+  };
+}
 var CoinPayClient = class {
   baseUrl;
   apiKey;
@@ -31285,6 +31355,94 @@ var CoinPayClient = class {
       raw: json.payment
     };
   }
+  /** Hosted invoice checkout link. Verified path shape: `/now/{invoice_id}`. */
+  invoiceLink(invoiceId) {
+    return `${this.baseUrl}/now/${invoiceId}`;
+  }
+  /**
+   * Create a draft invoice via the idempotent `POST /api/invoices` contract.
+   * The business's configured payee is used — this request never names a
+   * wallet, client, or email. A replay of the same key returns the original
+   * invoice (200) whatever its current status; changed terms are a 409.
+   */
+  async createInvoice(input) {
+    const body = {
+      business_id: this.businessId,
+      amount: input.amountUsd,
+      currency: "USD",
+      // Invoice publish passes this directly to the payment service's
+      // uppercase Blockchain enum; the legacy payments API normalizes itself.
+      crypto_currency: input.cryptoCurrency.toUpperCase(),
+      notes: input.notes,
+      source_reference: {
+        provider: "github",
+        repository: input.source.repository,
+        thread_number: input.source.threadNumber,
+        comment_id: input.source.commentId,
+        actor_id: input.source.actorId,
+        actor_login: input.source.actorLogin,
+        payer_login: input.source.payerLogin
+      },
+      source_rate_limit: input.sourceRateLimit
+    };
+    const res = await this.call("POST", "/api/invoices", body, {
+      "Idempotency-Key": input.idempotencyKey
+    }, true);
+    const json = await res.json().catch(() => null);
+    if (!res.ok) throw classifyInvoice(res.status, json);
+    if (json?.success !== true || typeof json.idempotentReplay !== "boolean") {
+      throw invalidResponse("missing success/idempotentReplay");
+    }
+    const summary = parseInvoiceSummary(json.invoice, {
+      businessId: this.businessId,
+      amountUsd: input.amountUsd
+    });
+    return { ...summary, idempotentReplay: json.idempotentReplay };
+  }
+  /**
+   * Publish a draft/sent invoice via `POST /api/invoices/{id}/publish` —
+   * creates live payment details WITHOUT emailing anyone. The returned row is
+   * verified (sent + payment address + our business/amount) before the caller
+   * may post a link, and the link itself is derived from the configured base
+   * URL rather than trusted from the response body.
+   */
+  async publishInvoice(invoiceId, expected) {
+    if (!UUID_RE.test(invoiceId)) throw invalidResponse("invoice id is not a UUID");
+    const res = await this.call("POST", `/api/invoices/${invoiceId}/publish`, void 0, void 0, true);
+    const json = await res.json().catch(() => null);
+    if (!res.ok) throw classifyInvoice(res.status, json);
+    if (json?.success !== true || typeof json.idempotentReplay !== "boolean") throw invalidResponse("missing success/idempotentReplay");
+    if (json.emailAttempted !== false) {
+      throw invalidResponse("publish endpoint reported an email attempt");
+    }
+    const summary = parseInvoiceSummary(json.invoice, {
+      businessId: this.businessId,
+      amountUsd: expected.amountUsd
+    });
+    if (summary.invoiceId !== invoiceId) throw invalidResponse("published a different invoice");
+    if (summary.status !== "sent") throw invalidResponse(`status is ${summary.status}, not sent`);
+    if (summary.feeRate === null) throw invalidResponse("fee rate missing after publish");
+    const row = json.invoice;
+    if (typeof row["payment_address"] !== "string" || row["payment_address"].trim() === "") {
+      throw invalidResponse("payment address missing");
+    }
+    if (json.paymentLink !== this.invoiceLink(invoiceId)) {
+      throw invalidResponse("payment link does not match the invoice");
+    }
+    const feeAmountCents = row["fee_amount"] !== null && row["fee_amount"] !== void 0 ? usdCents(row["fee_amount"]) : Number.NaN;
+    if (row["fee_amount"] !== null && row["fee_amount"] !== void 0 && (!Number.isFinite(feeAmountCents) || feeAmountCents < 0 || feeAmountCents > usdCents(expected.amountUsd))) {
+      throw invalidResponse("invalid fee amount");
+    }
+    const feeAmountUsd = Number.isFinite(feeAmountCents) && feeAmountCents >= 0 ? feeAmountCents / 100 : Math.round(expected.amountUsd * summary.feeRate * 100) / 100;
+    return {
+      ...summary,
+      feeRate: summary.feeRate,
+      feeAmountUsd,
+      paymentAddress: row["payment_address"],
+      paymentLink: this.invoiceLink(invoiceId),
+      idempotentReplay: json.idempotentReplay === true
+    };
+  }
   /** Fetch current payment state (drives pull-only `/coinpay status`). */
   async getPayment(paymentId) {
     const res = await this.call("GET", `/api/payments/${encodeURIComponent(paymentId)}`);
@@ -31300,10 +31458,11 @@ var CoinPayClient = class {
     if (json === null) throw new CoinPayError("SERVER", "Empty response body", res.status);
     return json;
   }
-  async call(method, path, body, extraHeaders) {
+  async call(method, path, body, extraHeaders, invoiceRequest = false) {
     try {
       return await this.fetchImpl(`${this.baseUrl}${path}`, {
         method,
+        ...invoiceRequest ? { signal: AbortSignal.timeout(3e4) } : {},
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.apiKey}`,
@@ -31451,15 +31610,20 @@ var SUPPORTED_CRYPTO = /* @__PURE__ */ new Set([
   "usdc_base"
 ]);
 var USD_AMOUNT_RE = /^\d{1,9}(?:\.\d{1,2})?$/;
+var GITHUB_LOGIN_RE = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
+function isValidGithubLogin(value) {
+  return GITHUB_LOGIN_RE.test(value);
+}
+var MAX_INVOICE_DESCRIPTION_LENGTH = 200;
 function isCanonicalUsdAmount(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0 && USD_AMOUNT_RE.test(String(value));
 }
-function tokenize(line) {
+function tokenizeDetailed(line) {
   const tokens = [];
   const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
   let m;
   while ((m = re.exec(line)) !== null) {
-    tokens.push(m[1] ?? m[2] ?? m[3] ?? "");
+    tokens.push({ text: m[1] ?? m[2] ?? m[3] ?? "", quoted: m[3] === void 0 });
   }
   return tokens;
 }
@@ -31498,7 +31662,8 @@ function parseCommand(body) {
   if (line === null) {
     return { kind: "error", code: "not_a_command", message: "No /coinpay command found." };
   }
-  const tokens = tokenize(line);
+  const detailed = tokenizeDetailed(line);
+  const tokens = detailed.map((token) => token.text);
   const sub = (tokens[1] ?? "help").toLowerCase();
   switch (sub) {
     case "help":
@@ -31510,6 +31675,9 @@ function parseCommand(body) {
     case "cancel":
       return { kind: "cancel" };
     case "create":
+      if (detailed[2]?.text.startsWith("@")) {
+        return parsePublishInvoice(detailed.slice(2));
+      }
       return parseInvoice(tokens.slice(2), "create");
     case "invoice":
       return parseInvoice(tokens.slice(2), "invoice");
@@ -31520,6 +31688,87 @@ function parseCommand(body) {
         message: `Unknown subcommand \`${tokens[1]}\`. Try \`/coinpay help\`.`
       };
   }
+}
+var PUBLISH_INVOICE_USAGE = 'Example: `/coinpay create @payer 25 "Fix the settlement race"`';
+function sanitizeDescription(value) {
+  return value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+}
+function parsePublishInvoice(args) {
+  const fail = (code, message) => ({
+    kind: "error",
+    code,
+    message,
+    flow: "publish_invoice"
+  });
+  let dryRun = false;
+  const positionals = [];
+  for (const token of args) {
+    if (!token.quoted && token.text.startsWith("--")) {
+      if (token.text === "--dry-run") {
+        dryRun = true;
+        continue;
+      }
+      return fail(
+        "unknown_flag",
+        `Unsupported flag for \`/coinpay create @payer\`. Only \`--dry-run\` is supported. ${PUBLISH_INVOICE_USAGE}`
+      );
+    }
+    positionals.push(token);
+  }
+  const payer = positionals[0].text.slice(1);
+  if (!GITHUB_LOGIN_RE.test(payer)) {
+    return fail(
+      "bad_payer",
+      `The payer must be a single valid GitHub login mention. ${PUBLISH_INVOICE_USAGE}`
+    );
+  }
+  const amountToken = positionals[1];
+  if (amountToken === void 0) {
+    return fail("missing_amount", `Missing amount. ${PUBLISH_INVOICE_USAGE}`);
+  }
+  const amountText = amountToken.text.startsWith("$") ? amountToken.text.slice(1) : amountToken.text;
+  const amount = Number(amountText);
+  if (!USD_AMOUNT_RE.test(amountText) || !Number.isFinite(amount) || amount <= 0) {
+    return fail(
+      "bad_amount",
+      `Invalid amount. Use a positive decimal USD amount with at most two decimal places. ${PUBLISH_INVOICE_USAGE}`
+    );
+  }
+  let next = 2;
+  const fiatCandidate = positionals[next];
+  if (fiatCandidate !== void 0 && !fiatCandidate.quoted && /^[a-z]{3}$/i.test(fiatCandidate.text)) {
+    if (fiatCandidate.text.toUpperCase() !== "USD") {
+      return fail(
+        "bad_fiat",
+        `Unsupported fiat \`${fiatCandidate.text.toUpperCase()}\`. CoinPay GitHub invoices currently support USD only.`
+      );
+    }
+    next += 1;
+  }
+  const descriptionToken = positionals[next];
+  if (descriptionToken === void 0) {
+    return fail("missing_description", `Missing description. ${PUBLISH_INVOICE_USAGE}`);
+  }
+  if (!descriptionToken.quoted) {
+    return fail("bad_description", `Wrap the description in quotes. ${PUBLISH_INVOICE_USAGE}`);
+  }
+  if (positionals.length > next + 1) {
+    return fail(
+      "bad_arguments",
+      `Unexpected extra argument. ${PUBLISH_INVOICE_USAGE}`
+    );
+  }
+  const description = sanitizeDescription(descriptionToken.text);
+  if (description.length === 0) {
+    return fail("bad_description", `The description must contain visible text. ${PUBLISH_INVOICE_USAGE}`);
+  }
+  if (description.length > MAX_INVOICE_DESCRIPTION_LENGTH) {
+    return fail(
+      "bad_description",
+      `The description is limited to ${MAX_INVOICE_DESCRIPTION_LENGTH} characters.`
+    );
+  }
+  return { kind: "publish_invoice", payer, amount, fiat: "USD", description, dryRun };
 }
 function parseInvoice(args, source) {
   const { positionals, flags, missingValueFlags } = parseFlags(
@@ -31614,6 +31863,11 @@ var DEFAULT_LABELS = {
   cancelled: "coinpay:cancelled",
   error: "coinpay:error"
 };
+var DEFAULT_GITHUB_INVOICES = {
+  enabled: false,
+  maxAmountUsd: 1e3,
+  repositoryHourlyCap: 20
+};
 var DEFAULT_CONFIG = {
   enabled: true,
   defaultCrypto: "usdc_pol",
@@ -31621,6 +31875,7 @@ var DEFAULT_CONFIG = {
   minRoleToCreateInvoice: "collaborator",
   requireApprovalForNonMaintainers: true,
   labels: { ...DEFAULT_LABELS },
+  githubInvoices: { ...DEFAULT_GITHUB_INVOICES },
   commands: { invoice: true, approve: true, status: true, cancel: true }
 };
 function resolveDefaultCrypto(value) {
@@ -31628,8 +31883,21 @@ function resolveDefaultCrypto(value) {
   const normalized = value.trim().toLowerCase();
   return SUPPORTED_CRYPTO.has(normalized) ? normalized : DEFAULT_CONFIG.defaultCrypto;
 }
+function resolveGithubInvoices(value) {
+  const raw = value && typeof value === "object" ? value : {};
+  const maxAmountUsd = isCanonicalUsdAmount(raw["maxAmountUsd"]) ? raw["maxAmountUsd"] : DEFAULT_GITHUB_INVOICES.maxAmountUsd;
+  const cap = raw["repositoryHourlyCap"];
+  const repositoryHourlyCap = typeof cap === "number" && Number.isSafeInteger(cap) && cap >= 1 && cap <= 1e3 ? cap : DEFAULT_GITHUB_INVOICES.repositoryHourlyCap;
+  return { enabled: raw["enabled"] === true, maxAmountUsd, repositoryHourlyCap };
+}
 function resolveConfig(partial) {
-  if (!partial) return { ...DEFAULT_CONFIG, labels: { ...DEFAULT_LABELS } };
+  if (!partial) {
+    return {
+      ...DEFAULT_CONFIG,
+      labels: { ...DEFAULT_LABELS },
+      githubInvoices: { ...DEFAULT_GITHUB_INVOICES }
+    };
+  }
   return {
     enabled: partial.enabled ?? DEFAULT_CONFIG.enabled,
     defaultCrypto: resolveDefaultCrypto(partial.defaultCrypto),
@@ -31637,6 +31905,7 @@ function resolveConfig(partial) {
     minRoleToCreateInvoice: partial.minRoleToCreateInvoice ?? DEFAULT_CONFIG.minRoleToCreateInvoice,
     requireApprovalForNonMaintainers: partial.requireApprovalForNonMaintainers ?? DEFAULT_CONFIG.requireApprovalForNonMaintainers,
     labels: { ...DEFAULT_LABELS, ...partial.labels ?? {} },
+    githubInvoices: resolveGithubInvoices(partial.githubInvoices),
     commands: { ...DEFAULT_CONFIG.commands, ...partial.commands ?? {} }
   };
 }
@@ -31808,6 +32077,59 @@ function dryRunComment(args) {
     handledMarker(args.handledCommentId)
   ].join("\n");
 }
+var ISSUER_DISCLOSURE = "_Issued by this repository\u2019s configured CoinPayPortal business \u2014 not the commenter\u2019s personal account. The payer mention is a GitHub reference only, not a linked CoinPay client._";
+function fmtFee(feeRate, feeAmountUsd) {
+  const percent = (feeRate * 100).toFixed(feeRate * 100 % 1 === 0 ? 0 : 2);
+  return `${percent}% (${feeAmountUsd.toFixed(2)} USD)`;
+}
+function githubInvoiceSuccessComment(args) {
+  return [
+    "### CoinPayPortal invoice published",
+    "",
+    `@${args.payer} \u2014 a CoinPayPortal invoice has been issued to this thread with you as the requested payer.`,
+    "",
+    `**Invoice:** \`${markdownCodeText(args.invoiceNumber)}\`  `,
+    `**Amount:** ${fmtAmount(args.amount, "USD")}  `,
+    `**Description:** ${markdownCodeSpan(args.description)}  `,
+    `**Work:** [${markdownLinkText(args.threadLabel)}](${args.threadUrl})  `,
+    `**Platform fee:** ${fmtFee(args.feeRate, args.feeAmountUsd)}`,
+    "",
+    `**Pay here:** ${cleanSummaryText(args.paymentLink)}`,
+    "",
+    `_Requested by @${cleanSummaryText(args.actor)}_`,
+    ISSUER_DISCLOSURE,
+    "",
+    handledMarker(args.handledCommentId)
+  ].join("\n");
+}
+function githubInvoiceDryRunComment(args) {
+  return [
+    "### CoinPayPortal invoice preview",
+    "",
+    "**Dry run:** no invoice was created, no payment link exists, no labels were changed, and the payer was not notified.  ",
+    // Code span keeps the mention inert so GitHub sends no notification.
+    `**Payer (not notified):** \`@${markdownCodeText(args.payer)}\`  `,
+    `**Amount:** ${fmtAmount(args.amount, "USD")}  `,
+    `**Description:** ${markdownCodeSpan(args.description)}  `,
+    `**Crypto:** ${cleanSummaryText(args.crypto)}  `,
+    `**Work:** [${markdownLinkText(args.threadLabel)}](${args.threadUrl})  `,
+    `**Idempotency key:** \`${markdownCodeText(args.idempotencyKey)}\``,
+    "",
+    "Run the same command without `--dry-run` to create and publish the invoice.",
+    ISSUER_DISCLOSURE,
+    "",
+    handledMarker(args.handledCommentId)
+  ].join("\n");
+}
+function githubInvoiceExistsComment(args) {
+  return [
+    "### CoinPayPortal invoice already exists",
+    "",
+    `Invoice \`${markdownCodeText(args.invoiceNumber)}\` was already created from this exact comment and is now \`${markdownCodeText(args.status)}\`. It was not reopened and no new payment link was issued. Post a new comment if further payment is owed.`,
+    "",
+    handledMarker(args.handledCommentId)
+  ].join("\n");
+}
 function pendingComment(args) {
   const r = args.request;
   return [
@@ -31834,7 +32156,8 @@ function helpComment(handledCommentId) {
     "",
     "| Command | Description |",
     "| --- | --- |",
-    "| `/coinpay create $10 USD --wallet <address>` | On a PR, create an idempotent invoice from the PR and linked issue. |",
+    '| `/coinpay create @payer <amount> "<desc>"` | Publish an invoice from this repository\u2019s configured CoinPayPortal business (when enabled). Anyone may run it; `@payer` is a mention, not a linked account. Add `--dry-run` to preview. |',
+    "| `/coinpay create $10 USD --wallet <address>` | On a PR, create an idempotent payment from the PR and linked issue. |",
     '| `/coinpay invoice <amount> USD --crypto <code> --for "<desc>"` | Create (maintainer) or request (contributor) a payment. |',
     "| `/coinpay approve` | Maintainer: approve the pending request in this thread. |",
     "| `/coinpay status` | Show the current payment status for this thread. |",
@@ -31842,6 +32165,7 @@ function helpComment(handledCommentId) {
     "| `/coinpay help` | Show this help. |",
     "",
     "Examples:",
+    '- `/coinpay create @octocat 25 "Fix the settlement race"`',
     "- `/coinpay create $10 USD --wallet <address> --dry-run`",
     '- `/coinpay invoice 250 USD --crypto usdc_pol --for "Milestone 1"`'
   ];
@@ -31878,6 +32202,9 @@ async function handleComment(evt, deps) {
     return { action: "noop_duplicate" };
   }
   if (parsed.kind === "error") {
+    if (parsed.flow === "publish_invoice" && !isHumanActor(evt)) {
+      return { action: "skipped", detail: "non_human_commenter" };
+    }
     await deps.github.createComment(evt.ref, errorComment(parsed.message, evt.commentId));
     return { action: "error", detail: parsed.code };
   }
@@ -31887,6 +32214,8 @@ async function handleComment(evt, deps) {
       return { action: "help" };
     case "invoice":
       return handleInvoice(parsed, evt, deps, existing);
+    case "publish_invoice":
+      return handlePublishInvoice(parsed, evt, deps);
     case "approve":
       return handleApprove(evt, deps, existing);
     case "status":
@@ -31894,6 +32223,9 @@ async function handleComment(evt, deps) {
     case "cancel":
       return handleCancel(evt, deps, existing);
   }
+}
+function isHumanActor(evt) {
+  return (evt.actorType ?? "").toLowerCase() === "user";
 }
 async function handleInvoice(cmd, evt, deps, existing) {
   if (!deps.config.commands.invoice) {
@@ -32019,6 +32351,161 @@ async function handleInvoice(cmd, evt, deps, existing) {
     deps,
     existing
   );
+}
+function githubInvoiceIdempotencyKey(repositoryId, commentId) {
+  return `github:repository:${repositoryId}:comment:${commentId}`;
+}
+function canonicalThreadUrl(ref, isPullRequest) {
+  return `https://github.com/${ref.owner}/${ref.repo}/${isPullRequest ? "pull" : "issues"}/${ref.issueNumber}`;
+}
+async function handlePublishInvoice(cmd, evt, deps) {
+  if (!isHumanActor(evt)) {
+    return { action: "skipped", detail: "non_human_commenter" };
+  }
+  const settings = deps.config.githubInvoices;
+  if (!settings.enabled) {
+    await deps.github.createComment(
+      evt.ref,
+      errorComment(
+        "The `/coinpay create @payer \u2026` invoice command is not enabled for this repository. A maintainer can enable it by setting `githubInvoices.enabled: true` in `.github/coinpay.yml` \u2014 but only after the CoinPayPortal idempotent invoice deployment (API + migration) is live, or every command will fail.",
+        evt.commentId
+      )
+    );
+    return { action: "noop_disabled", detail: "github_invoices_disabled" };
+  }
+  if (!Number.isSafeInteger(evt.actorId) || evt.actorId <= 0 || !isValidGithubLogin(evt.actor) || !Number.isSafeInteger(evt.repositoryId) || evt.repositoryId <= 0 || !Number.isSafeInteger(evt.commentId) || evt.commentId <= 0) {
+    await deps.github.createComment(
+      evt.ref,
+      errorComment(
+        "Could not verify the GitHub actor, repository, and comment identities, so no invoice was created.",
+        evt.commentId
+      )
+    );
+    return { action: "error", detail: "missing_actor_identity" };
+  }
+  if (cmd.amount > settings.maxAmountUsd) {
+    await deps.github.createComment(
+      evt.ref,
+      errorComment(
+        `The amount ${cmd.amount.toFixed(2)} USD exceeds this repository\u2019s per-invoice maximum of ${settings.maxAmountUsd.toFixed(2)} USD (config: \`githubInvoices.maxAmountUsd\`).`,
+        evt.commentId
+      )
+    );
+    return { action: "error", detail: "amount_over_limit" };
+  }
+  const threadUrl = canonicalThreadUrl(evt.ref, evt.isPullRequest);
+  const threadLabel = `${evt.ref.owner}/${evt.ref.repo}#${evt.ref.issueNumber}`;
+  const idempotencyKey = githubInvoiceIdempotencyKey(evt.repositoryId, evt.commentId);
+  if (cmd.dryRun) {
+    await deps.github.createComment(
+      evt.ref,
+      githubInvoiceDryRunComment({
+        payer: cmd.payer,
+        amount: cmd.amount,
+        description: cmd.description,
+        crypto: deps.config.defaultCrypto,
+        threadUrl,
+        threadLabel,
+        idempotencyKey,
+        handledCommentId: evt.commentId
+      })
+    );
+    return { action: "dry_run" };
+  }
+  try {
+    const created = await deps.coinpay.createInvoice({
+      amountUsd: cmd.amount,
+      cryptoCurrency: deps.config.defaultCrypto,
+      // Stable notes: sanitized description + canonical thread/comment URL.
+      notes: `${cmd.description}
+
+${threadUrl}#issuecomment-${evt.commentId}`,
+      source: {
+        repository: `${evt.ref.owner}/${evt.ref.repo}`,
+        threadNumber: evt.ref.issueNumber,
+        commentId: evt.commentId,
+        actorId: evt.actorId,
+        actorLogin: evt.actor,
+        payerLogin: cmd.payer
+      },
+      sourceRateLimit: settings.repositoryHourlyCap,
+      idempotencyKey
+    });
+    if (created.status !== "draft" && created.status !== "sent") {
+      await deps.github.createComment(
+        evt.ref,
+        githubInvoiceExistsComment({
+          invoiceNumber: created.invoiceNumber,
+          status: created.status,
+          handledCommentId: evt.commentId
+        })
+      );
+      return { action: "invoice_already_closed", detail: created.status, invoiceId: created.invoiceId };
+    }
+    const published = await deps.coinpay.publishInvoice(created.invoiceId, {
+      amountUsd: cmd.amount
+    });
+    const latest = await deps.github.listComments(evt.ref);
+    if (isHandled(latest, evt.commentId)) {
+      return { action: "noop_duplicate", invoiceId: created.invoiceId };
+    }
+    await deps.github.createComment(
+      evt.ref,
+      githubInvoiceSuccessComment({
+        payer: cmd.payer,
+        actor: evt.actor,
+        amount: cmd.amount,
+        description: cmd.description,
+        invoiceNumber: published.invoiceNumber,
+        paymentLink: published.paymentLink,
+        feeRate: published.feeRate,
+        feeAmountUsd: published.feeAmountUsd,
+        threadUrl,
+        threadLabel,
+        handledCommentId: evt.commentId
+      })
+    );
+    await deps.github.addLabels(evt.ref, [deps.config.labels.pending]);
+    return { action: "invoice_published", invoiceId: created.invoiceId };
+  } catch (err) {
+    await deps.github.createComment(evt.ref, errorComment(friendlyInvoiceError(err)));
+    await deps.github.addLabels(evt.ref, [deps.config.labels.error]);
+    return { action: "error", detail: err instanceof CoinPayError ? err.code : "unknown" };
+  }
+}
+function friendlyInvoiceError(err) {
+  const retry = "Ask a maintainer to re-run this same GitHub Actions run, not post a new command comment. Only the same source comment reuses the invoice.";
+  if (err instanceof CoinPayError) {
+    switch (err.code) {
+      case "NO_WALLET":
+        return "The repository\u2019s CoinPayPortal business has no receiving wallet for the configured crypto. A maintainer can add one in CoinPayPortal settings. " + retry;
+      case "AUTH":
+        return "CoinPayPortal rejected the API key. Check the `COINPAY_API_KEY` secret for this repository.";
+      case "BAD_REQUEST":
+        return "CoinPayPortal rejected the invoice terms or configuration. A maintainer should check the command, business settings, and existing invoice before trying again. Re-running an unchanged invalid request will not fix it. No payment link was posted.";
+      case "RATE_LIMIT":
+        return "This repository\u2019s hourly invoice cap has been reached. Wait for the window to pass. " + retry;
+      case "IDEMPOTENCY_CONFLICT":
+        return "An invoice was already recorded for this comment with different terms, so no new invoice was created. Check the existing invoice in CoinPayPortal before requesting a replacement.";
+      case "INVOICE_DELETED":
+        return "The invoice originally created from this comment was deleted in CoinPayPortal and will not be recreated automatically. Post a new comment if payment is still owed.";
+      case "UNAVAILABLE":
+        return "CoinPayPortal cannot confirm idempotent invoice creation right now (the deployment or migration may still be rolling out). " + retry;
+      case "PUBLISH_RETRY":
+        return "The invoice exists but its payment details are still being prepared. " + retry;
+      case "NOT_PUBLISHABLE":
+        return "The invoice created from this comment is already closed and stays closed. No payment link was posted.";
+      case "INVALID_RESPONSE":
+        return "CoinPayPortal returned an unexpected response, so no payment link was posted. " + retry;
+      case "NETWORK":
+        return "Could not reach CoinPayPortal; creation may have completed before the connection failed. " + retry;
+      case "SERVER":
+        return "CoinPayPortal had an internal error. " + retry;
+      default:
+        return "CoinPayPortal could not confirm invoice creation. " + retry;
+    }
+  }
+  return "An unexpected error occurred during invoice creation or reply delivery. " + retry;
 }
 async function handleApprove(evt, deps, existing) {
   if (!canApprove(evt.authorAssociation)) {
@@ -32202,9 +32689,12 @@ async function run() {
   const coinpay = new CoinPayClient({ baseUrl, apiKey, businessId });
   const evt = {
     ref,
+    repositoryId: payload.repository?.id,
     commentId: payload.comment.id,
     body: payload.comment.body ?? "",
     actor: payload.comment.user?.login ?? "unknown",
+    actorId: payload.comment.user?.id,
+    actorType: payload.comment.user?.type,
     authorAssociation: payload.comment.author_association ?? "NONE",
     issueUrl: payload.issue.html_url ?? "",
     isPullRequest: payload.issue.pull_request !== void 0
@@ -32213,6 +32703,7 @@ async function run() {
   core.info(`coinpaybot action=${result.action}${result.detail ? ` detail=${result.detail}` : ""}`);
   core.setOutput("action", result.action);
   if (result.paymentId) core.setOutput("payment_id", result.paymentId);
+  if (result.invoiceId) core.setOutput("invoice_id", result.invoiceId);
 }
 run().catch((err) => {
   core.setFailed(err instanceof Error ? err.message : String(err));
