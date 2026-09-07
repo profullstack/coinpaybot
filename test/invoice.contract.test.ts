@@ -240,7 +240,21 @@ describe('CoinPayClient.publishInvoice — contract', () => {
     })));
     const res = await c.publishInvoice(INVOICE_ID, { amountUsd: 25 });
     expect(res.feeRate).toBe(0.013);
-    expect(res.feeAmountUsd).toBe(0.33);
+    expect(res.feeAmountUsd).toBe(0.325);
+  });
+
+  it.each([
+    [20.13, '0.01', 0.2013, 0.2013],
+    [20.13, '0.01', '0.20130000', 0.2013],
+    [1, '0.005', 0.005, 0.005],
+    [0.1, '0.005', '0.00050000', 0.0005],
+  ])('accepts the unrounded activation fee for a %s USD invoice', async (amount, rate, fee, expectedFee) => {
+    const c = client(mockFetch(200, publishResponse({
+      invoice: { amount, fee_rate: rate, fee_amount: fee },
+    })));
+    const res = await c.publishInvoice(INVOICE_ID, { amountUsd: amount as number });
+    expect(res.feeAmountUsd).toBe(expectedFee);
+    expect(res.paymentLink).toBe(`https://coinpayportal.com/now/${INVOICE_ID}`);
   });
 
   it.each([
@@ -253,7 +267,10 @@ describe('CoinPayClient.publishInvoice — contract', () => {
     ['missing fee rate', { invoice: { fee_rate: null } }],
     ['boolean fee amount', { invoice: { fee_amount: false } }],
     ['fee exceeds invoice', { invoice: { fee_amount: 26 } }],
-    ['fractional fee cent', { invoice: { fee_amount: 0.251 } }],
+    ['negative fee amount', { invoice: { fee_amount: -0.005 } }],
+    ['nonfinite fee string', { invoice: { fee_amount: 'Infinity' } }],
+    ['invalid fee string', { invoice: { fee_amount: 'not-a-number' } }],
+    ['fractional invoice cent', { invoice: { amount: 25.001 } }],
     ['tampered amount', { invoice: { amount: 2500 } }],
   ])('refuses to return an unverified publish response: %s', async (_name, overrides) => {
     const c = client(mockFetch(200, publishResponse(overrides as never)));

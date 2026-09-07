@@ -418,17 +418,14 @@ export class CoinPayClient {
     if (json.paymentLink !== this.invoiceLink(invoiceId)) {
       throw invalidResponse('payment link does not match the invoice');
     }
-    const feeAmountCents =
-      row['fee_amount'] !== null && row['fee_amount'] !== undefined
-        ? usdCents(row['fee_amount'])
-        : Number.NaN;
-    if (row['fee_amount'] !== null && row['fee_amount'] !== undefined
-        && (!Number.isFinite(feeAmountCents) || feeAmountCents < 0 || feeAmountCents > usdCents(expected.amountUsd))) {
+    // Activation returns amount * fee_rate without rounding to USD cents.
+    // Validate that fee as a decimal; principal amounts still require whole cents.
+    const feeAmountUsd = row['fee_amount'] !== null && row['fee_amount'] !== undefined
+      ? decimalNumber(row['fee_amount'])
+      : expected.amountUsd * summary.feeRate;
+    if (!Number.isFinite(feeAmountUsd) || feeAmountUsd < 0 || feeAmountUsd > expected.amountUsd) {
       throw invalidResponse('invalid fee amount');
     }
-    const feeAmountUsd = Number.isFinite(feeAmountCents) && feeAmountCents >= 0
-      ? feeAmountCents / 100
-      : Math.round(expected.amountUsd * summary.feeRate * 100) / 100;
     return {
       ...summary,
       feeRate: summary.feeRate,
