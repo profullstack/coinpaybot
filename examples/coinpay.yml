@@ -18,3 +18,13 @@ commands:
   approve: true
   status: true
   cancel: true
+# `/coinpay create @payer <amount> "<description>"` — publish a real invoice
+# from THIS REPOSITORY'S configured CoinPayPortal business. Disabled by
+# default: enable it only after the CoinPayPortal idempotent invoice
+# deployment (API + migration) is live, or every command fails with a
+# temporary-unavailability reply. Open to all human commenters once enabled;
+# the payer mention is a GitHub reference, not a linked CoinPay account.
+githubInvoices:
+  enabled: false
+  maxAmountUsd: 1000        # per-invoice cap (USD, up to 2 decimals)
+  repositoryHourlyCap: 20   # per-repository hourly cap enforced by the API (1-1000)

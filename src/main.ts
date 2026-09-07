@@ -41,6 +41,9 @@ export async function run(): Promise<void> {
     return;
   }
   const payload = github.context.payload;
+  // Only newly created comments qualify. Edited comments are deliberately
+  // ignored: the invoice identity is the original comment, and edits must not
+  // re-trigger or alter money flows.
   if (payload.action !== 'created' || !payload.comment || !payload.issue) {
     core.info('Not a created issue comment; nothing to do.');
     return;
@@ -65,9 +68,12 @@ export async function run(): Promise<void> {
 
   const evt: CommentEvent = {
     ref,
+    repositoryId: payload.repository?.id as number | undefined,
     commentId: payload.comment.id as number,
     body: (payload.comment.body as string) ?? '',
     actor: (payload.comment.user?.login as string) ?? 'unknown',
+    actorId: payload.comment.user?.id as number | undefined,
+    actorType: payload.comment.user?.type as string | undefined,
     authorAssociation: (payload.comment.author_association as string) ?? 'NONE',
     issueUrl: (payload.issue.html_url as string) ?? '',
     isPullRequest: payload.issue.pull_request !== undefined,
@@ -77,6 +83,7 @@ export async function run(): Promise<void> {
   core.info(`coinpaybot action=${result.action}${result.detail ? ` detail=${result.detail}` : ''}`);
   core.setOutput('action', result.action);
   if (result.paymentId) core.setOutput('payment_id', result.paymentId);
+  if (result.invoiceId) core.setOutput('invoice_id', result.invoiceId);
 }
 
 run().catch((err) => {

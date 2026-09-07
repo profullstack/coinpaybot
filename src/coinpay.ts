@@ -25,6 +25,24 @@
  *    5xx with the same key cannot create a second payable payment.
  *  - Webhook signature header `X-CoinPay-Signature: t=<unix>,v1=<hex>` where
  *    hex = HMAC_SHA256(`${t}.${rawBody}`, webhook_secret), 300s tolerance.
+ *
+ * Invoice creation/publish shapes were verified against the coinpayportal
+ * `feat/invoice-creation-idempotency` branch (2026-09-07):
+ * src/app/api/invoices/route.ts, src/lib/invoices/creation.ts,
+ * src/app/api/invoices/[id]/publish/route.ts, src/lib/invoices/activation.ts,
+ * src/lib/payments/service.ts (case-sensitive uppercase Blockchain enum),
+ * and supabase/migrations/20260907100000_invoice_creation_idempotency.sql.
+ *  - POST /api/invoices with an `Idempotency-Key` header returns
+ *    { success:true, invoice:<db row>, idempotentReplay:boolean } — 201 on
+ *    first create, 200 on replay. 409 IDEMPOTENCY_CONFLICT for the same key
+ *    with different terms, 410 INVOICE_DELETED once the original is deleted,
+ *    429 SOURCE_RATE_LIMIT when the per-repository hourly cap is exhausted
+ *    (replays bypass the cap), 503 while the idempotency migration is absent.
+ *  - POST /api/invoices/{id}/publish returns { success:true, invoice,
+ *    paymentLink:<absolute .../now/{id}>, emailAttempted:false,
+ *    idempotentReplay } and can 409 (PAYMENT_CREATION_IN_PROGRESS /
+ *    INVOICE_STATE_CHANGED) requiring a retry; only draft/sent publish, a
+ *    closed invoice is 400 INVOICE_NOT_PUBLISHABLE and stays closed.
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
@@ -69,7 +87,15 @@ export type CoinPayErrorCode =
   | 'AUTH'
   | 'BAD_REQUEST'
   | 'SERVER'
-  | 'NETWORK';
+  | 'NETWORK'
+  // Invoice-flow codes, mapped from the verified /api/invoices contract:
+  | 'IDEMPOTENCY_CONFLICT' // 409: key reused with different terms
+  | 'INVOICE_DELETED' // 410: original invoice deleted; key can never recreate it
+  | 'RATE_LIMIT' // 429: repository hourly cap exhausted (replays bypass it)
+  | 'UNAVAILABLE' // 503: idempotency store unavailable (e.g. migration absent)
+  | 'PUBLISH_RETRY' // 409 on publish: payment still being created / state changed
+  | 'NOT_PUBLISHABLE' // 400 on publish: invoice is closed (paid/cancelled/...)
+  | 'INVALID_RESPONSE'; // 2xx body that fails contract validation
 
 export class CoinPayError extends Error {
   readonly code: CoinPayErrorCode;
@@ -95,6 +121,160 @@ function classify(status: number, body: { error?: string; usage?: unknown } | nu
     return new CoinPayError('BAD_REQUEST', msg, status);
   }
   return new CoinPayError('BAD_REQUEST', msg, status);
+}
+
+/**
+ * Error mapping for the invoice create/publish endpoints, which return typed
+ * `code` fields. The raw `error` text is kept for Action logs only — the
+ * handler renders fixed friendly text, never this message.
+ */
+function classifyInvoice(
+  status: number,
+  body: { error?: string; code?: string } | null,
+): CoinPayError {
+  const msg = body?.error ?? `HTTP ${status}`;
+  const code = body?.code;
+  if (status === 401 || status === 403) return new CoinPayError('AUTH', msg, status);
+  if (status === 409) {
+    // Anything other than a terms conflict (payment creation in progress,
+    // invoice state changed, sent-without-address) is safe to retry later.
+    return code === 'IDEMPOTENCY_CONFLICT'
+      ? new CoinPayError('IDEMPOTENCY_CONFLICT', msg, status)
+      : new CoinPayError('PUBLISH_RETRY', msg, status);
+  }
+  if (status === 410) return new CoinPayError('INVOICE_DELETED', msg, status);
+  if (status === 429) return new CoinPayError('RATE_LIMIT', msg, status);
+  if (status === 503) return new CoinPayError('UNAVAILABLE', msg, status);
+  if (status >= 500) return new CoinPayError('SERVER', msg, status);
+  if (status === 400) {
+    if (code === 'INVOICE_NOT_PUBLISHABLE' || code === 'INVOICE_NOT_ACTIVATABLE') {
+      return new CoinPayError('NOT_PUBLISHABLE', msg, status);
+    }
+    if (
+      code === 'PAYEE_REQUIRED' ||
+      code === 'PAYEE_INVALID' ||
+      code === 'CRYPTO_REQUIRED' ||
+      /no .*wallet configured/i.test(msg)
+    ) {
+      return new CoinPayError('NO_WALLET', msg, status);
+    }
+    return new CoinPayError('BAD_REQUEST', msg, status);
+  }
+  return new CoinPayError('BAD_REQUEST', msg, status);
+}
+
+/**
+ * Audit trail forwarded to CoinPayPortal's `source_reference` (validated there
+ * with the same shapes). `actorId` is the immutable numeric GitHub user id;
+ * logins are display/audit data only — neither maps to a CoinPay account.
+ */
+export interface GithubInvoiceSource {
+  /** `owner/repo` */
+  repository: string;
+  threadNumber: number;
+  commentId: number;
+  actorId: number;
+  actorLogin: string;
+  payerLogin: string;
+}
+
+export interface CreateInvoiceInput {
+  amountUsd: number;
+  /** CoinPayPortal crypto code the invoice settles in (from repo config). */
+  cryptoCurrency: string;
+  /** Stable plain-text notes: description + canonical GitHub thread URL. */
+  notes: string;
+  source: GithubInvoiceSource;
+  /** Repository hourly cap the portal enforces atomically (1-1000). */
+  sourceRateLimit: number;
+  /** REQUIRED. Stable identity derived from repository ID + comment ID only. */
+  idempotencyKey: string;
+}
+
+/** Fields validated out of a returned invoice row before anything is posted. */
+export interface InvoiceSummary {
+  invoiceId: string;
+  invoiceNumber: string;
+  status: string;
+  amountUsd: number;
+  currency: string;
+  /** Platform fee rate from the response (e.g. 0.01), never hardcoded. */
+  feeRate: number | null;
+}
+
+export interface CreateInvoiceResult extends InvoiceSummary {
+  idempotentReplay: boolean;
+}
+
+export interface PublishInvoiceResult extends InvoiceSummary {
+  feeRate: number;
+  /** Fee in USD, from the response (fee_amount, else amount × fee_rate). */
+  feeAmountUsd: number;
+  paymentAddress: string;
+  /** Canonical checkout URL derived from the configured base URL. */
+  paymentLink: string;
+  idempotentReplay: boolean;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function invalidResponse(detail: string): CoinPayError {
+  return new CoinPayError('INVALID_RESPONSE', `Malformed CoinPayPortal invoice response: ${detail}`, 200);
+}
+
+function usdCents(value: unknown): number {
+  const n = decimalNumber(value);
+  const cents = Math.round(n * 100);
+  return Number.isSafeInteger(cents) && n === cents / 100 ? cents : Number.NaN;
+}
+
+function decimalNumber(value: unknown): number {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : Number.NaN;
+  if (typeof value !== 'string' || !/^\d+(?:\.\d+)?$/.test(value)) return Number.NaN;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : Number.NaN;
+}
+
+/**
+ * Validate an invoice row returned by CoinPayPortal against what we asked for.
+ * Every field posted back to GitHub flows through this gate, so a malformed or
+ * tampered response can never place foreign ids or amounts into a comment.
+ */
+function parseInvoiceSummary(
+  invoice: unknown,
+  expected: { businessId: string; amountUsd: number },
+): InvoiceSummary {
+  if (!invoice || typeof invoice !== 'object') throw invalidResponse('missing invoice');
+  const row = invoice as Record<string, unknown>;
+  if (typeof row['id'] !== 'string' || !UUID_RE.test(row['id'])) {
+    throw invalidResponse('invoice id is not a UUID');
+  }
+  if (row['business_id'] !== expected.businessId) {
+    throw invalidResponse('invoice belongs to a different business');
+  }
+  if (row['currency'] !== 'USD') throw invalidResponse('invoice currency is not USD');
+  if (usdCents(row['amount']) !== usdCents(expected.amountUsd)) {
+    throw invalidResponse('invoice amount differs from the requested amount');
+  }
+  if (typeof row['invoice_number'] !== 'string' || row['invoice_number'].trim() === '') {
+    throw invalidResponse('invoice number missing');
+  }
+  if (typeof row['status'] !== 'string' || row['status'] === '') {
+    throw invalidResponse('invoice status missing');
+  }
+  let feeRate: number | null = null;
+  if (row['fee_rate'] !== null && row['fee_rate'] !== undefined) {
+    feeRate = decimalNumber(row['fee_rate']);
+    if (!Number.isFinite(feeRate) || feeRate < 0 || feeRate > 1) throw invalidResponse('invalid fee rate');
+  }
+  return {
+    invoiceId: row['id'],
+    invoiceNumber: row['invoice_number'],
+    status: row['status'],
+    amountUsd: expected.amountUsd,
+    currency: 'USD',
+    feeRate,
+  };
 }
 
 export class CoinPayClient {
@@ -150,6 +330,112 @@ export class CoinPayClient {
     };
   }
 
+  /** Hosted invoice checkout link. Verified path shape: `/now/{invoice_id}`. */
+  invoiceLink(invoiceId: string): string {
+    return `${this.baseUrl}/now/${invoiceId}`;
+  }
+
+  /**
+   * Create a draft invoice via the idempotent `POST /api/invoices` contract.
+   * The business's configured payee is used — this request never names a
+   * wallet, client, or email. A replay of the same key returns the original
+   * invoice (200) whatever its current status; changed terms are a 409.
+   */
+  async createInvoice(input: CreateInvoiceInput): Promise<CreateInvoiceResult> {
+    const body = {
+      business_id: this.businessId,
+      amount: input.amountUsd,
+      currency: 'USD',
+      // Invoice publish passes this directly to the payment service's
+      // uppercase Blockchain enum; the legacy payments API normalizes itself.
+      crypto_currency: input.cryptoCurrency.toUpperCase(),
+      notes: input.notes,
+      source_reference: {
+        provider: 'github',
+        repository: input.source.repository,
+        thread_number: input.source.threadNumber,
+        comment_id: input.source.commentId,
+        actor_id: input.source.actorId,
+        actor_login: input.source.actorLogin,
+        payer_login: input.source.payerLogin,
+      },
+      source_rate_limit: input.sourceRateLimit,
+    };
+    const res = await this.call('POST', '/api/invoices', body, {
+      'Idempotency-Key': input.idempotencyKey,
+    }, true);
+    const json = (await res.json().catch(() => null)) as {
+      success?: boolean; invoice?: unknown; idempotentReplay?: boolean;
+      error?: string; code?: string;
+    } | null;
+    if (!res.ok) throw classifyInvoice(res.status, json);
+    if (json?.success !== true || typeof json.idempotentReplay !== 'boolean') {
+      throw invalidResponse('missing success/idempotentReplay');
+    }
+    const summary = parseInvoiceSummary(json.invoice, {
+      businessId: this.businessId,
+      amountUsd: input.amountUsd,
+    });
+    return { ...summary, idempotentReplay: json.idempotentReplay };
+  }
+
+  /**
+   * Publish a draft/sent invoice via `POST /api/invoices/{id}/publish` —
+   * creates live payment details WITHOUT emailing anyone. The returned row is
+   * verified (sent + payment address + our business/amount) before the caller
+   * may post a link, and the link itself is derived from the configured base
+   * URL rather than trusted from the response body.
+   */
+  async publishInvoice(
+    invoiceId: string,
+    expected: { amountUsd: number },
+  ): Promise<PublishInvoiceResult> {
+    if (!UUID_RE.test(invoiceId)) throw invalidResponse('invoice id is not a UUID');
+    const res = await this.call('POST', `/api/invoices/${invoiceId}/publish`, undefined, undefined, true);
+    const json = (await res.json().catch(() => null)) as {
+      success?: boolean; invoice?: unknown; paymentLink?: unknown;
+      emailAttempted?: unknown; idempotentReplay?: boolean;
+      error?: string; code?: string;
+    } | null;
+    if (!res.ok) throw classifyInvoice(res.status, json);
+    if (json?.success !== true || typeof json.idempotentReplay !== 'boolean') throw invalidResponse('missing success/idempotentReplay');
+    if (json.emailAttempted !== false) {
+      // This endpoint's contract is publish-without-email. If that ever
+      // changes, refuse loudly rather than silently emailing payers.
+      throw invalidResponse('publish endpoint reported an email attempt');
+    }
+    const summary = parseInvoiceSummary(json.invoice, {
+      businessId: this.businessId,
+      amountUsd: expected.amountUsd,
+    });
+    if (summary.invoiceId !== invoiceId) throw invalidResponse('published a different invoice');
+    if (summary.status !== 'sent') throw invalidResponse(`status is ${summary.status}, not sent`);
+    if (summary.feeRate === null) throw invalidResponse('fee rate missing after publish');
+    const row = json.invoice as Record<string, unknown>;
+    if (typeof row['payment_address'] !== 'string' || row['payment_address'].trim() === '') {
+      throw invalidResponse('payment address missing');
+    }
+    if (json.paymentLink !== this.invoiceLink(invoiceId)) {
+      throw invalidResponse('payment link does not match the invoice');
+    }
+    // Activation returns amount * fee_rate without rounding to USD cents.
+    // Validate that fee as a decimal; principal amounts still require whole cents.
+    const feeAmountUsd = row['fee_amount'] !== null && row['fee_amount'] !== undefined
+      ? decimalNumber(row['fee_amount'])
+      : expected.amountUsd * summary.feeRate;
+    if (!Number.isFinite(feeAmountUsd) || feeAmountUsd < 0 || feeAmountUsd > expected.amountUsd) {
+      throw invalidResponse('invalid fee amount');
+    }
+    return {
+      ...summary,
+      feeRate: summary.feeRate,
+      feeAmountUsd,
+      paymentAddress: row['payment_address'],
+      paymentLink: this.invoiceLink(invoiceId),
+      idempotentReplay: json.idempotentReplay === true,
+    };
+  }
+
   /** Fetch current payment state (drives pull-only `/coinpay status`). */
   async getPayment(paymentId: string): Promise<{ status: string; raw: unknown }> {
     const res = await this.call('GET', `/api/payments/${encodeURIComponent(paymentId)}`);
@@ -176,10 +462,12 @@ export class CoinPayClient {
     path: string,
     body?: unknown,
     extraHeaders?: Record<string, string>,
+    invoiceRequest = false,
   ): Promise<Response> {
     try {
       return await this.fetchImpl(`${this.baseUrl}${path}`, {
         method,
+        ...(invoiceRequest ? { signal: AbortSignal.timeout(30000) } : {}),
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiKey}`,

@@ -25,9 +25,11 @@ inputs:
     default: 'github-actions[bot]'
 outputs:
   action:
-    description: 'What the bot did (invoice_created, request_pending, help, error, ...).'
+    description: 'What the bot did (invoice_created, invoice_published, request_pending, help, error, ...).'
   payment_id:
     description: 'CoinPayPortal payment id, when a payment was created.'
+  invoice_id:
+    description: 'CoinPayPortal invoice id, when a GitHub-published invoice was created.'
 runs:
   using: 'node24'
   main: 'dist/index.js'

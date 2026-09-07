@@ -144,6 +144,155 @@ describe('parseCommand', () => {
   });
 });
 
+describe('parseCommand — publish-invoice grammar (@payer first argument)', () => {
+  it('parses the canonical form', () => {
+    expect(parseCommand('/coinpay create @octocat 25 "Fix the settlement race"')).toEqual({
+      kind: 'publish_invoice',
+      payer: 'octocat',
+      amount: 25,
+      fiat: 'USD',
+      description: 'Fix the settlement race',
+      dryRun: false,
+    });
+  });
+
+  it('accepts the optional $ prefix, literal USD, and --dry-run', () => {
+    expect(
+      parseCommand('/coinpay create @octocat $10.50 USD "Milestone 1" --dry-run'),
+    ).toEqual({
+      kind: 'publish_invoice',
+      payer: 'octocat',
+      amount: 10.5,
+      fiat: 'USD',
+      description: 'Milestone 1',
+      dryRun: true,
+    });
+  });
+
+  it('keeps a numeric first argument on the legacy create flow', () => {
+    expect(parseCommand('/coinpay create $10 USD --wallet 0xabc')).toMatchObject({
+      kind: 'invoice',
+      source: 'create',
+      amount: 10,
+      wallet: '0xabc',
+    });
+  });
+
+  it.each([
+    '@',
+    '@-octocat',
+    '@octocat-',
+    '@oct$cat',
+    '@' + 'a'.repeat(40),
+  ])('rejects an invalid payer login %s', (payer) => {
+    expect(parseCommand(`/coinpay create ${payer} 10 "x"`)).toMatchObject({
+      kind: 'error',
+      code: 'bad_payer',
+      flow: 'publish_invoice',
+    });
+  });
+
+  it.each(['-5', 'abc', '1.001', '1e3', '1000000000', '0'])(
+    'rejects a non-canonical amount %s',
+    (amount) => {
+      expect(parseCommand(`/coinpay create @octocat ${amount} "x"`)).toMatchObject({
+        kind: 'error',
+        code: 'bad_amount',
+      });
+    },
+  );
+
+  it('rejects non-USD fiat and missing pieces', () => {
+    expect(parseCommand('/coinpay create @octocat 10 EUR "x"')).toMatchObject({
+      kind: 'error',
+      code: 'bad_fiat',
+    });
+    expect(parseCommand('/coinpay create @octocat')).toMatchObject({
+      kind: 'error',
+      code: 'missing_amount',
+    });
+    expect(parseCommand('/coinpay create @octocat 10')).toMatchObject({
+      kind: 'error',
+      code: 'missing_description',
+    });
+    expect(parseCommand('/coinpay create @octocat 10 USD')).toMatchObject({
+      kind: 'error',
+      code: 'missing_description',
+    });
+  });
+
+  it('requires the description to be quoted', () => {
+    expect(parseCommand('/coinpay create @octocat 10 fix-bug')).toMatchObject({
+      kind: 'error',
+      code: 'bad_description',
+    });
+  });
+
+  it('treats a quoted "USD" as a description, not fiat', () => {
+    expect(parseCommand('/coinpay create @octocat 10 "USD"')).toMatchObject({
+      kind: 'publish_invoice',
+      description: 'USD',
+    });
+  });
+
+  it('rejects sneaked flags — wallet, crypto, anything but --dry-run', () => {
+    for (const flag of ['--wallet 0xattacker', '--crypto btc', '--for x', '--to y', '--client z']) {
+      expect(parseCommand(`/coinpay create @octocat 10 "x" ${flag}`)).toMatchObject({
+        kind: 'error',
+        code: 'unknown_flag',
+        flow: 'publish_invoice',
+      });
+    }
+  });
+
+  it('rejects trailing arguments after the description', () => {
+    expect(parseCommand('/coinpay create @octocat 10 "x" extra')).toMatchObject({
+      kind: 'error',
+      code: 'bad_arguments',
+    });
+  });
+
+  it('treats a quoted "--dry-run" as data, not a flag', () => {
+    expect(parseCommand('/coinpay create @octocat 10 "--dry-run"')).toEqual({
+      kind: 'publish_invoice',
+      payer: 'octocat',
+      amount: 10,
+      fiat: 'USD',
+      description: '--dry-run',
+      dryRun: false,
+    });
+  });
+
+  it('sanitizes the description deterministically: control chars and runs of space', () => {
+    expect(
+      parseCommand('/coinpay create @octocat 10 "a\tb\u0000c   d"'),
+    ).toMatchObject({ kind: 'publish_invoice', description: 'a b c d' });
+  });
+  it.each([
+    '/coinpay create @bad`@victim 10 "x"',
+    '/coinpay create @payer bad`@victim "x"',
+    '/coinpay create @payer 10 "x" --bad`@victim',
+    '/coinpay create @payer 10 "x" unexpected`@victim',
+  ])('does not echo hostile input in public parse errors: %s', (command) => {
+    const result = parseCommand(command);
+    expect(result).toMatchObject({kind: 'error', flow: 'publish_invoice'});
+    if (result.kind === 'error') expect(result.message).not.toContain('@victim');
+  });
+
+  it('bounds the description and rejects blank text', () => {
+    expect(
+      parseCommand(`/coinpay create @octocat 10 "${'a'.repeat(201)}"`),
+    ).toMatchObject({ kind: 'error', code: 'bad_description' });
+    expect(
+      parseCommand(`/coinpay create @octocat 10 "${'a'.repeat(200)}"`),
+    ).toMatchObject({ kind: 'publish_invoice' });
+    expect(parseCommand('/coinpay create @octocat 10 "   "')).toMatchObject({
+      kind: 'error',
+      code: 'bad_description',
+    });
+  });
+});
+
 describe('isCanonicalUsdAmount', () => {
   it.each([0.01, 10, 10.5, 999_999_999.99])(
     'accepts a canonical marker amount %s',

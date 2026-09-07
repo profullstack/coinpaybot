@@ -221,6 +221,80 @@ export function dryRunComment(args: {
   ].join('\n');
 }
 
+/**
+ * The honest scope line every GitHub-invoice comment carries: the issuer is
+ * the repository's configured CoinPayPortal business (there is no GitHub-to-
+ * CoinPay account mapping), and the payer is a mention, not a verified client.
+ */
+const ISSUER_DISCLOSURE =
+  '_Issued by this repository’s configured CoinPayPortal business — not the commenter’s personal account. The payer mention is a GitHub reference only, not a linked CoinPay client._';
+
+function fmtFee(feeRate: number, feeAmountUsd: number): string {
+  const percent = (feeRate * 100).toFixed(feeRate * 100 % 1 === 0 ? 0 : 2);
+  return `${percent}% (${feeAmountUsd.toFixed(2)} USD)`;
+}
+
+export function githubInvoiceSuccessComment(args: {
+  payer: string; actor: string; amount: number; description: string;
+  invoiceNumber: string; paymentLink: string; feeRate: number; feeAmountUsd: number;
+  threadUrl: string; threadLabel: string; handledCommentId: number;
+}): string {
+  return [
+    '### CoinPayPortal invoice published',
+    '',
+    `@${args.payer} — a CoinPayPortal invoice has been issued to this thread with you as the requested payer.`,
+    '',
+    `**Invoice:** \`${markdownCodeText(args.invoiceNumber)}\`  `,
+    `**Amount:** ${fmtAmount(args.amount, 'USD')}  `,
+    `**Description:** ${markdownCodeSpan(args.description)}  `,
+    `**Work:** [${markdownLinkText(args.threadLabel)}](${args.threadUrl})  `,
+    `**Platform fee:** ${fmtFee(args.feeRate, args.feeAmountUsd)}`,
+    '',
+    `**Pay here:** ${cleanSummaryText(args.paymentLink)}`,
+    '',
+    `_Requested by @${cleanSummaryText(args.actor)}_`,
+    ISSUER_DISCLOSURE,
+    '',
+    handledMarker(args.handledCommentId),
+  ].join('\n');
+}
+
+export function githubInvoiceDryRunComment(args: {
+  payer: string; amount: number; description: string; crypto: string;
+  threadUrl: string; threadLabel: string; idempotencyKey: string;
+  handledCommentId: number;
+}): string {
+  return [
+    '### CoinPayPortal invoice preview',
+    '',
+    '**Dry run:** no invoice was created, no payment link exists, no labels were changed, and the payer was not notified.  ',
+    // Code span keeps the mention inert so GitHub sends no notification.
+    `**Payer (not notified):** \`@${markdownCodeText(args.payer)}\`  `,
+    `**Amount:** ${fmtAmount(args.amount, 'USD')}  `,
+    `**Description:** ${markdownCodeSpan(args.description)}  `,
+    `**Crypto:** ${cleanSummaryText(args.crypto)}  `,
+    `**Work:** [${markdownLinkText(args.threadLabel)}](${args.threadUrl})  `,
+    `**Idempotency key:** \`${markdownCodeText(args.idempotencyKey)}\``,
+    '',
+    'Run the same command without `--dry-run` to create and publish the invoice.',
+    ISSUER_DISCLOSURE,
+    '',
+    handledMarker(args.handledCommentId),
+  ].join('\n');
+}
+
+export function githubInvoiceExistsComment(args: {
+  invoiceNumber: string; status: string; handledCommentId: number;
+}): string {
+  return [
+    '### CoinPayPortal invoice already exists',
+    '',
+    `Invoice \`${markdownCodeText(args.invoiceNumber)}\` was already created from this exact comment and is now \`${markdownCodeText(args.status)}\`. It was not reopened and no new payment link was issued. Post a new comment if further payment is owed.`,
+    '',
+    handledMarker(args.handledCommentId),
+  ].join('\n');
+}
+
 export function pendingComment(args: {
   request: PendingRequest; approveCommand: string; handledCommentId: number;
 }): string {
@@ -266,7 +340,8 @@ export function helpComment(handledCommentId?: number): string {
     '',
     '| Command | Description |',
     '| --- | --- |',
-    '| `/coinpay create $10 USD --wallet <address>` | On a PR, create an idempotent invoice from the PR and linked issue. |',
+    '| `/coinpay create @payer <amount> "<desc>"` | Publish an invoice from this repository’s configured CoinPayPortal business (when enabled). Anyone may run it; `@payer` is a mention, not a linked account. Add `--dry-run` to preview. |',
+    '| `/coinpay create $10 USD --wallet <address>` | On a PR, create an idempotent payment from the PR and linked issue. |',
     '| `/coinpay invoice <amount> USD --crypto <code> --for "<desc>"` | Create (maintainer) or request (contributor) a payment. |',
     '| `/coinpay approve` | Maintainer: approve the pending request in this thread. |',
     '| `/coinpay status` | Show the current payment status for this thread. |',
@@ -274,6 +349,7 @@ export function helpComment(handledCommentId?: number): string {
     '| `/coinpay help` | Show this help. |',
     '',
     'Examples:',
+    '- `/coinpay create @octocat 25 "Fix the settlement race"`',
     '- `/coinpay create $10 USD --wallet <address> --dry-run`',
     '- `/coinpay invoice 250 USD --crypto usdc_pol --for "Milestone 1"`',
   ];
