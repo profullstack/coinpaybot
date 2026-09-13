@@ -1,6 +1,10 @@
 # Optional repo config. Place at .github/coinpay.yml in a consumer repo.
 # All keys are optional; product defaults are shown.
 enabled: true
+contributionRewards:
+  enabled: false
+  rateUsd: '0.001'
+  payment: manual
 defaultCrypto: usdc_pol
 defaultFiat: USD
 minRoleToCreateInvoice: collaborator   # owner | member | collaborator

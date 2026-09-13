@@ -12,14 +12,17 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
+  id-token: write
 
 concurrency:
-  group: coinpay-${{ github.repository_id }}-${{ github.event.issue.number }}
+  group: coinpay-${{ github.repository_id }}-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
   coinpay:
-    if: github.event.issue.pull_request && github.event.comment.user.type == 'User' && startsWith(github.event.comment.body, '/coinpay ')
+    if: >-
+      (github.event_name == 'pull_request_target' && github.event.action == 'closed' && github.event.pull_request.merged == true) ||
+      (github.event_name == 'issue_comment' && github.event.action == 'created' && github.event.issue.pull_request && github.event.comment.user.type == 'User' && startsWith(github.event.comment.body, '/coinpay '))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -29,6 +32,23 @@ jobs:
         with:
           script: |
             core.setOutput('allowed', false);
+            if (context.eventName === 'pull_request_target' && context.payload.action === 'closed' &&
+                context.payload.pull_request?.merged === true) {
+              try {
+                const number = context.payload.pull_request.number;
+                if (!Number.isSafeInteger(number) || number < 1) return;
+                const { data: pull } = await github.rest.pulls.get({ ...context.repo, pull_number: number });
+                const repository = pull.base?.repo;
+                const allowed = pull.merged === true && pull.state === 'closed' && pull.number === number &&
+                  repository?.id === context.payload.repository?.id &&
+                  repository?.full_name?.toLowerCase() === `${context.repo.owner}/${context.repo.repo}`.toLowerCase();
+                core.setOutput('allowed', allowed);
+                if (!allowed) core.notice('The current pull request does not match this repository merge event.');
+              } catch {
+                core.warning('Could not verify the merged pull request; CoinPay was not invoked.');
+              }
+              return;
+            }
             const comment = context.payload.comment;
             if (context.eventName !== 'issue_comment' || context.payload.action !== 'created' ||
                 !context.payload.issue?.pull_request || comment?.user?.type !== 'User' ||
@@ -57,8 +77,8 @@ jobs:
             const configured = Boolean(process.env.COINPAY_API_KEY?.trim() && process.env.COINPAY_BUSINESS_ID?.trim());
             core.setOutput('configured', configured);
             if (!configured) {
-              core.notice('CoinPay setup is incomplete; no payment or invoice was created.');
-              await core.summary.addRaw('Configure COINPAY_API_KEY and COINPAY_BUSINESS_ID as repository secrets or inherited organization secrets. See https://github.com/profullstack/coinpaybot/blob/main/docs/pr-commands.md.').write();
+              core.notice('CoinPay setup is incomplete; no contribution, payment or invoice was created.');
+              await core.summary.addRaw('For contribution rewards, configure COINPAY_CONTRIBUTIONS_KEY and COINPAY_CONTRIBUTIONS_BUSINESS_ID, then map them to this workflow\'s COINPAY_API_KEY and COINPAY_BUSINESS_ID inputs. See https://github.com/profullstack/coinpaybot/blob/main/docs/pr-commands.md.').write();
             }
 
       # Runs the reviewed action only; never checks out or executes PR code.

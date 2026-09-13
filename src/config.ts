@@ -22,6 +22,12 @@ export interface GithubInvoiceConfig {
   repositoryHourlyCap: number;
 }
 
+export interface ContributionRewardsConfig {
+  enabled: boolean;
+  rateUsd: '0.001';
+  payment: 'manual';
+}
+
 export interface LabelConfig {
   requested: string;
   pending: string;
@@ -41,6 +47,7 @@ export interface ResolvedConfig {
   requireApprovalForNonMaintainers: boolean;
   labels: LabelConfig;
   githubInvoices: GithubInvoiceConfig;
+  contributionRewards: ContributionRewardsConfig;
   commands: {
     invoice: boolean;
     approve: boolean;
@@ -65,6 +72,12 @@ export const DEFAULT_GITHUB_INVOICES: GithubInvoiceConfig = {
   repositoryHourlyCap: 20,
 };
 
+export const DEFAULT_CONTRIBUTION_REWARDS: ContributionRewardsConfig = {
+  enabled: false,
+  rateUsd: '0.001',
+  payment: 'manual',
+};
+
 export const DEFAULT_CONFIG: ResolvedConfig = {
   enabled: true,
   defaultCrypto: 'usdc_pol',
@@ -73,6 +86,7 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
   requireApprovalForNonMaintainers: true,
   labels: { ...DEFAULT_LABELS },
   githubInvoices: { ...DEFAULT_GITHUB_INVOICES },
+  contributionRewards: { ...DEFAULT_CONTRIBUTION_REWARDS },
   commands: { invoice: true, approve: true, status: true, cancel: true },
 };
 
@@ -104,6 +118,19 @@ function resolveGithubInvoices(value: unknown): GithubInvoiceConfig {
   return { enabled: raw['enabled'] === true, maxAmountUsd, repositoryHourlyCap };
 }
 
+function resolveContributionRewards(value: unknown): ContributionRewardsConfig {
+  if (value === undefined) return { ...DEFAULT_CONTRIBUTION_REWARDS };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('contributionRewards requires enabled, rateUsd and payment.');
+  }
+  const raw = value as Record<string, unknown>;
+  if (Object.keys(raw).sort().join(',') !== 'enabled,payment,rateUsd' ||
+      typeof raw['enabled'] !== 'boolean' || raw['rateUsd'] !== '0.001' || raw['payment'] !== 'manual') {
+    throw new Error("contributionRewards requires boolean enabled, rateUsd: '0.001', payment: 'manual'.");
+  }
+  return { enabled: raw['enabled'], rateUsd: '0.001', payment: 'manual' };
+}
+
 /** Merge a partial (e.g. parsed YAML) over the product defaults. */
 export function resolveConfig(partial?: DeepPartial<ResolvedConfig> | null): ResolvedConfig {
   if (!partial) {
@@ -111,6 +138,7 @@ export function resolveConfig(partial?: DeepPartial<ResolvedConfig> | null): Res
       ...DEFAULT_CONFIG,
       labels: { ...DEFAULT_LABELS },
       githubInvoices: { ...DEFAULT_GITHUB_INVOICES },
+      contributionRewards: { ...DEFAULT_CONTRIBUTION_REWARDS },
     };
   }
   return {
@@ -122,6 +150,7 @@ export function resolveConfig(partial?: DeepPartial<ResolvedConfig> | null): Res
       partial.requireApprovalForNonMaintainers ?? DEFAULT_CONFIG.requireApprovalForNonMaintainers,
     labels: { ...DEFAULT_LABELS, ...(partial.labels ?? {}) },
     githubInvoices: resolveGithubInvoices(partial.githubInvoices),
+    contributionRewards: resolveContributionRewards(partial.contributionRewards),
     commands: { ...DEFAULT_CONFIG.commands, ...(partial.commands ?? {}) },
   };
 }

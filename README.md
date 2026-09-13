@@ -1,6 +1,8 @@
 # coinpaybot — CoinPayPortal for GitHub
 
-Create [CoinPayPortal](https://coinpayportal.com) crypto invoices and payment links directly from GitHub issue and pull-request comments.
+Track merged-PR contribution rewards with [CoinPayPortal](https://coinpayportal.com), pay whole cents manually through checkout, or use the separate invoice commands from GitHub comments.
+
+With repository enrollment and explicit opt-in, each merged PR earns **$0.001 USD**: ten PRs make one cent. The portal prevents duplicate accrual; the bot never pays automatically. See [merged PR rewards and setup](docs/pr-commands.md).
 
 A maintainer comments:
 
@@ -10,11 +12,11 @@ A maintainer comments:
 
 …and the bot creates a CoinPayPortal payment and replies with a payable link.
 
-This repository is the **GitHub Action MVP** (PRD Phase 1). It runs on `issue_comment.created`, needs no hosted service, and can be dropped into any repo.
+This repository is a GitHub Action. Its shared workflow handles merged PRs and maintainer commands; CoinPayPortal stores contribution balances and payment records. Legacy invoice commands also work on `issue_comment.created`.
 
 ## Quick start
 
-For maintainer-controlled contribution payments across repositories, use the
+For merged-PR contribution rewards and manual payments across repositories, use the
 [shared PR workflow](docs/pr-commands.md). A small pinned caller adds current
 repository permission checks and setup checks without copying that logic into
 each repository. The direct Action setup below also supports general issue
@@ -28,6 +30,8 @@ commands and contributor request flows.
 
 | Command | Who | Description |
 | --- | --- | --- |
+| `/coinpay balance` | Current repository maintainer on a PR | Show this contributor's repository reward balance and payable whole cents. Requires contribution opt-in. |
+| `/coinpay settle --wallet <address> --blockchain USDC_POL` | Current repository maintainer on a PR | Reserve available whole cents for a manually paid contributor checkout. The wallet and chain must be independently verified. |
 | `/coinpay create @payer <amount> "<desc>"` | Anyone (opt-in, disabled by default) | Create **and publish** a CoinPayPortal invoice from the repository's configured business and reply with a live payment link. Add `--dry-run` to preview without creating anything. See [GitHub-published invoices](#github-published-invoices-coinpay-create-payer). |
 | `/coinpay create $10 USD --wallet <address>` | Maintainer on a PR | Create an idempotent payment from the PR and up to five linked closing issues. Add `--dry-run` to preview without creating anything. |
 | `/coinpay invoice <amount> USD --crypto <code> --for "<desc>"` | Maintainer (direct) / contributor (request) | Create or request a payment. |
@@ -93,6 +97,8 @@ pnpm install
 pnpm run typecheck
 pnpm run test      # unit + contract + e2e (vitest)
 pnpm run build     # bundle dist/index.js (committed; GitHub runs it)
+pnpm run test:workflow # execute actual reusable-workflow guards with mocks
+pnpm run test:bundle   # execute committed bundle with all real network denied
 ```
 
 Contract tests (`test/coinpay.contract.test.ts`) pin the adapter to the CoinPayPortal API shapes verified against its `master` source, including the `t=<ts>,v1=<hmac>` webhook signature. If CoinPayPortal changes its contract, these fail loudly.

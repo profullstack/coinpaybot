@@ -99,7 +99,7 @@ test('configured setup reveals no values and performs no network request', async
 test('financial workflow uses immutable actions, both gates, and no PR checkout', () => {
   const references = [...workflow.matchAll(/uses: (\S+)/g)].map(match => match[1]);
   assert.ok(references.every(ref => /@[a-f0-9]{40}$/.test(ref)));
-  assert.ok(references.includes('profullstack/coinpaybot@fbf099175de2d8f6ed105b20d677e7a30b19cfac'));
+  assert.ok(references.some(ref => /^profullstack\/coinpaybot@[a-f0-9]{40}$/.test(ref)));
   assert.match(workflow, /if: steps\.authorization\.outputs\.allowed == 'true' && steps\.setup\.outputs\.configured == 'true'/);
   assert.ok(!workflow.includes('actions/checkout@'));
   assert.ok(!workflow.includes('pull_request_target:'));
@@ -113,8 +113,43 @@ test('reusable entrypoint requires the caller event and passes only named secret
   assert.match(workflow, /COINPAY_BUSINESS_ID:\s*\n\s+required: false/);
   const example = fs.readFileSync(new URL('../examples/coinpay-pr-commands.yml', import.meta.url), 'utf8');
   assert.match(example, /issue_comment:\s*\n\s+types: \[created\]/);
+  assert.match(example, /pull_request_target:\s*\n\s+types: \[closed\]/);
+  assert.match(example, /id-token: write/);
+  assert.match(workflow, /id-token: write/);
+  assert.match(example, /COINPAY_API_KEY: \$\{\{ secrets\.COINPAY_CONTRIBUTIONS_KEY \}\}/);
+  assert.match(example, /COINPAY_BUSINESS_ID: \$\{\{ secrets\.COINPAY_CONTRIBUTIONS_BUSINESS_ID \}\}/);
   assert.match(example, /uses: profullstack\/coinpaybot\/\.github\/workflows\/pr-commands.yml@REVIEWED_COMMIT_SHA/);
   assert.ok(!example.includes('secrets: inherit'));
   assert.ok(!example.includes('runs-on:'));
   assert.ok(!example.includes('concurrency:'));
+});
+
+function mergeFixture() {
+  const f=fixture();
+  f.context.eventName='pull_request_target';
+  f.context.payload={action:'closed',repository:{id:123},pull_request:{number:42,merged:true}};
+  f.pull={number:42,merged:true,state:'closed',base:{repo:{id:123,full_name:'ralyodio/defpromo'}}};
+  f.github.rest.pulls={get:async args=>{f.requests.push(args);return {data:f.pull};}};
+  return f;
+}
+
+test('merged target event is verified against current base repository PR',async()=>{
+  const f=mergeFixture();await authorize(f.github,f.context,f.core,{env:{}});
+  assert.equal(f.outputs.allowed,true);
+  assert.deepEqual(f.requests,[{owner:'ralyodio',repo:'defpromo',pull_number:42}]);
+});
+
+for(const [name,change] of [
+  ['ordinary fork PR event',f=>{f.context.eventName='pull_request';}],
+  ['closed unmerged event',f=>{f.context.payload.pull_request.merged=false;}],
+  ['synchronize target event',f=>{f.context.payload.action='synchronize';}],
+  ['API says not merged',f=>{f.pull.merged=false;}],
+  ['API says open',f=>{f.pull.state='open';}],
+  ['foreign repository ID',f=>{f.pull.base.repo.id=999;}],
+  ['foreign repository name',f=>{f.pull.base.repo.full_name='attacker/repo';}],
+  ['different PR number',f=>{f.pull.number=99;}],
+  ['unreadable PR',f=>{f.github.rest.pulls.get=async()=>{throw new Error('private details');};}],
+])test(`merge gate rejects ${name}`,async()=>{
+  const f=mergeFixture();change(f);await authorize(f.github,f.context,f.core,{env:{}});
+  assert.equal(f.outputs.allowed,false);assert.ok(!f.messages.join('').includes('private details'));
 });

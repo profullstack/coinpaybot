@@ -952,8 +952,8 @@ var require_util = __commonJS({
     function isStream(obj) {
       return obj && typeof obj === "object" && typeof obj.pipe === "function" && typeof obj.on === "function";
     }
-    function isBlobLike(object) {
-      return Blob2 && object instanceof Blob2 || object && typeof object === "object" && (typeof object.stream === "function" || typeof object.arrayBuffer === "function") && /^(Blob|File)$/.test(object[Symbol.toStringTag]);
+    function isBlobLike(object2) {
+      return Blob2 && object2 instanceof Blob2 || object2 && typeof object2 === "object" && (typeof object2.stream === "function" || typeof object2.arrayBuffer === "function") && /^(Blob|File)$/.test(object2[Symbol.toStringTag]);
     }
     function buildURL(url, queryParams) {
       if (url.includes("?") || url.includes("#")) {
@@ -1231,8 +1231,8 @@ var require_util = __commonJS({
         0
       );
     }
-    function isFormDataLike(object) {
-      return object && typeof object === "object" && typeof object.append === "function" && typeof object.delete === "function" && typeof object.get === "function" && typeof object.getAll === "function" && typeof object.has === "function" && typeof object.set === "function" && object[Symbol.toStringTag] === "FormData";
+    function isFormDataLike(object2) {
+      return object2 && typeof object2 === "object" && typeof object2.append === "function" && typeof object2.delete === "function" && typeof object2.get === "function" && typeof object2.getAll === "function" && typeof object2.has === "function" && typeof object2.set === "function" && object2[Symbol.toStringTag] === "FormData";
     }
     function throwIfAborted(signal) {
       if (!signal) {
@@ -3670,8 +3670,8 @@ var require_util2 = __commonJS({
       }
       return "allowed";
     }
-    function isErrorLike(object) {
-      return object instanceof Error || (object?.constructor?.name === "Error" || object?.constructor?.name === "DOMException");
+    function isErrorLike(object2) {
+      return object2 instanceof Error || (object2?.constructor?.name === "Error" || object2?.constructor?.name === "DOMException");
     }
     function isValidReasonPhrase(statusText) {
       for (let i = 0; i < statusText.length; ++i) {
@@ -4064,7 +4064,7 @@ var require_util2 = __commonJS({
     }
     var esIteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
     function makeIterator(iterator, name, kind) {
-      const object = {
+      const object2 = {
         index: 0,
         kind,
         target: iterator
@@ -4076,14 +4076,14 @@ var require_util2 = __commonJS({
               `'next' called on an object that does not implement interface ${name} Iterator.`
             );
           }
-          const { index, kind: kind2, target } = object;
+          const { index, kind: kind2, target } = object2;
           const values = target();
           const len = values.length;
           if (index >= len) {
             return { value: void 0, done: true };
           }
           const pair = values[index];
-          object.index = index + 1;
+          object2.index = index + 1;
           return iteratorResult(pair, kind2);
         },
         // The class string of an iterator prototype object for a given interface is the
@@ -5087,8 +5087,8 @@ var require_file = __commonJS({
       }
       return s.replace(/\r?\n/g, nativeLineEnding);
     }
-    function isFileLike(object) {
-      return NativeFile && object instanceof NativeFile || object instanceof File || object && (typeof object.stream === "function" || typeof object.arrayBuffer === "function") && object[Symbol.toStringTag] === "File";
+    function isFileLike(object2) {
+      return NativeFile && object2 instanceof NativeFile || object2 instanceof File || object2 && (typeof object2.stream === "function" || typeof object2.arrayBuffer === "function") && object2[Symbol.toStringTag] === "File";
     }
     module.exports = { File, FileLike, isFileLike };
   }
@@ -5286,15 +5286,15 @@ var require_body = __commonJS({
     var File = NativeFile ?? UndiciFile;
     var textEncoder = new TextEncoder();
     var textDecoder = new TextDecoder();
-    function extractBody(object, keepalive = false) {
+    function extractBody(object2, keepalive = false) {
       if (!ReadableStream) {
         ReadableStream = __require("stream/web").ReadableStream;
       }
       let stream = null;
-      if (object instanceof ReadableStream) {
-        stream = object;
-      } else if (isBlobLike(object)) {
-        stream = object.stream();
+      if (object2 instanceof ReadableStream) {
+        stream = object2;
+      } else if (isBlobLike(object2)) {
+        stream = object2.stream();
       } else {
         stream = new ReadableStream({
           async pull(controller) {
@@ -5313,17 +5313,17 @@ var require_body = __commonJS({
       let source = null;
       let length = null;
       let type = null;
-      if (typeof object === "string") {
-        source = object;
+      if (typeof object2 === "string") {
+        source = object2;
         type = "text/plain;charset=UTF-8";
-      } else if (object instanceof URLSearchParams) {
-        source = object.toString();
+      } else if (object2 instanceof URLSearchParams) {
+        source = object2.toString();
         type = "application/x-www-form-urlencoded;charset=UTF-8";
-      } else if (isArrayBuffer(object)) {
-        source = new Uint8Array(object.slice());
-      } else if (ArrayBuffer.isView(object)) {
-        source = new Uint8Array(object.buffer.slice(object.byteOffset, object.byteOffset + object.byteLength));
-      } else if (util.isFormDataLike(object)) {
+      } else if (isArrayBuffer(object2)) {
+        source = new Uint8Array(object2.slice());
+      } else if (ArrayBuffer.isView(object2)) {
+        source = new Uint8Array(object2.buffer.slice(object2.byteOffset, object2.byteOffset + object2.byteLength));
+      } else if (util.isFormDataLike(object2)) {
         const boundary = `----formdata-undici-0${`${random(1e11)}`.padStart(11, "0")}`;
         const prefix = `--${boundary}\r
 Content-Disposition: form-data`;
@@ -5333,7 +5333,7 @@ Content-Disposition: form-data`;
         const rn = new Uint8Array([13, 10]);
         length = 0;
         let hasUnknownSizeValue = false;
-        for (const [name, value] of object) {
+        for (const [name, value] of object2) {
           if (typeof value === "string") {
             const chunk2 = textEncoder.encode(prefix + `; name="${escape(normalizeLinefeeds(name))}"\r
 \r
@@ -5360,7 +5360,7 @@ Content-Type: ${value.type || "application/octet-stream"}\r
         if (hasUnknownSizeValue) {
           length = null;
         }
-        source = object;
+        source = object2;
         action = async function* () {
           for (const part of blobParts) {
             if (part.stream) {
@@ -5371,22 +5371,22 @@ Content-Type: ${value.type || "application/octet-stream"}\r
           }
         };
         type = "multipart/form-data; boundary=" + boundary;
-      } else if (isBlobLike(object)) {
-        source = object;
-        length = object.size;
-        if (object.type) {
-          type = object.type;
+      } else if (isBlobLike(object2)) {
+        source = object2;
+        length = object2.size;
+        if (object2.type) {
+          type = object2.type;
         }
-      } else if (typeof object[Symbol.asyncIterator] === "function") {
+      } else if (typeof object2[Symbol.asyncIterator] === "function") {
         if (keepalive) {
           throw new TypeError("keepalive");
         }
-        if (util.isDisturbed(object) || object.locked) {
+        if (util.isDisturbed(object2) || object2.locked) {
           throw new TypeError(
             "Response body object should not be disturbed or locked"
           );
         }
-        stream = object instanceof ReadableStream ? object : ReadableStreamFrom(object);
+        stream = object2 instanceof ReadableStream ? object2 : ReadableStreamFrom(object2);
       }
       if (typeof source === "string" || util.isBuffer(source)) {
         length = Buffer.byteLength(source);
@@ -5395,7 +5395,7 @@ Content-Type: ${value.type || "application/octet-stream"}\r
         let iterator;
         stream = new ReadableStream({
           async start() {
-            iterator = action(object)[Symbol.asyncIterator]();
+            iterator = action(object2)[Symbol.asyncIterator]();
           },
           async pull(controller) {
             const { value, done } = await iterator.next();
@@ -5419,15 +5419,15 @@ Content-Type: ${value.type || "application/octet-stream"}\r
       const body = { stream, source, length };
       return [body, type];
     }
-    function safelyExtractBody(object, keepalive = false) {
+    function safelyExtractBody(object2, keepalive = false) {
       if (!ReadableStream) {
         ReadableStream = __require("stream/web").ReadableStream;
       }
-      if (object instanceof ReadableStream) {
-        assert(!util.isDisturbed(object), "The body has already been consumed.");
-        assert(!object.locked, "The stream is locked.");
+      if (object2 instanceof ReadableStream) {
+        assert(!util.isDisturbed(object2), "The body has already been consumed.");
+        assert(!object2.locked, "The stream is locked.");
       }
-      return extractBody(object, keepalive);
+      return extractBody(object2, keepalive);
     }
     function cloneBody(body) {
       const [out1, out2] = body.stream.tee();
@@ -5573,10 +5573,10 @@ Content-Type: ${value.type || "application/octet-stream"}\r
     function mixinBody(prototype) {
       Object.assign(prototype.prototype, bodyMixinMethods(prototype));
     }
-    async function specConsumeBody(object, convertBytesToJSValue, instance) {
-      webidl.brandCheck(object, instance);
-      throwIfAborted(object[kState]);
-      if (bodyUnusable(object[kState].body)) {
+    async function specConsumeBody(object2, convertBytesToJSValue, instance) {
+      webidl.brandCheck(object2, instance);
+      throwIfAborted(object2[kState]);
+      if (bodyUnusable(object2[kState].body)) {
         throw new TypeError("Body is unusable");
       }
       const promise = createDeferredPromise();
@@ -5588,11 +5588,11 @@ Content-Type: ${value.type || "application/octet-stream"}\r
           errorSteps(e);
         }
       };
-      if (object[kState].body == null) {
+      if (object2[kState].body == null) {
         successSteps(new Uint8Array());
         return promise.promise;
       }
-      await fullyReadBody(object[kState].body, successSteps, errorSteps);
+      await fullyReadBody(object2[kState].body, successSteps, errorSteps);
       return promise.promise;
     }
     function bodyUnusable(body) {
@@ -5611,8 +5611,8 @@ Content-Type: ${value.type || "application/octet-stream"}\r
     function parseJSONFromBytes(bytes) {
       return JSON.parse(utf8DecodeBytes(bytes));
     }
-    function bodyMimeType(object) {
-      const { headersList } = object[kState];
+    function bodyMimeType(object2) {
+      const { headersList } = object2[kState];
       const contentType = headersList.get("content-type");
       if (contentType === null) {
         return "failure";
@@ -11573,10 +11573,10 @@ var require_headers = __commonJS({
       while (j > i && isHTTPWhiteSpaceCharCode(potentialValue.charCodeAt(i))) ++i;
       return i === 0 && j === potentialValue.length ? potentialValue : potentialValue.substring(i, j);
     }
-    function fill(headers, object) {
-      if (Array.isArray(object)) {
-        for (let i = 0; i < object.length; ++i) {
-          const header = object[i];
+    function fill(headers, object2) {
+      if (Array.isArray(object2)) {
+        for (let i = 0; i < object2.length; ++i) {
+          const header = object2[i];
           if (header.length !== 2) {
             throw webidl.errors.exception({
               header: "Headers constructor",
@@ -11585,10 +11585,10 @@ var require_headers = __commonJS({
           }
           appendHeader(headers, header[0], header[1]);
         }
-      } else if (typeof object === "object" && object !== null) {
-        const keys = Object.keys(object);
+      } else if (typeof object2 === "object" && object2 !== null) {
+        const keys = Object.keys(object2);
         for (let i = 0; i < keys.length; ++i) {
-          appendHeader(headers, keys[i], object[keys[i]]);
+          appendHeader(headers, keys[i], object2[keys[i]]);
         }
       } else {
         throw webidl.errors.conversionFailed({
@@ -19786,12 +19786,12 @@ Support boolean input list: \`true | True | TRUE | false | False | FALSE\``);
       return process.env[`STATE_${name}`] || "";
     }
     exports.getState = getState;
-    function getIDToken(aud) {
+    function getIDToken2(aud) {
       return __awaiter(this, void 0, void 0, function* () {
         return yield oidc_utils_1.OidcClient.getIDToken(aud);
       });
     }
-    exports.getIDToken = getIDToken;
+    exports.getIDToken = getIDToken2;
     var summary_1 = require_summary();
     Object.defineProperty(exports, "summary", { enumerable: true, get: function() {
       return summary_1.summary;
@@ -20170,12 +20170,12 @@ var require_dist_node2 = __commonJS({
         format: ""
       }
     };
-    function lowercaseKeys(object) {
-      if (!object) {
+    function lowercaseKeys(object2) {
+      if (!object2) {
         return {};
       }
-      return Object.keys(object).reduce((newObj, key) => {
-        newObj[key.toLowerCase()] = object[key];
+      return Object.keys(object2).reduce((newObj, key) => {
+        newObj[key.toLowerCase()] = object2[key];
         return newObj;
       }, {});
     }
@@ -20257,11 +20257,11 @@ var require_dist_node2 = __commonJS({
       }
       return matches.map(removeNonChars).reduce((a, b) => a.concat(b), []);
     }
-    function omit(object, keysToOmit) {
+    function omit(object2, keysToOmit) {
       const result = { __proto__: null };
-      for (const key of Object.keys(object)) {
+      for (const key of Object.keys(object2)) {
         if (keysToOmit.indexOf(key) === -1) {
-          result[key] = object[key];
+          result[key] = object2[key];
         }
       }
       return result;
@@ -31393,11 +31393,11 @@ var CoinPayClient = class {
     if (json?.success !== true || typeof json.idempotentReplay !== "boolean") {
       throw invalidResponse("missing success/idempotentReplay");
     }
-    const summary = parseInvoiceSummary(json.invoice, {
+    const summary2 = parseInvoiceSummary(json.invoice, {
       businessId: this.businessId,
       amountUsd: input.amountUsd
     });
-    return { ...summary, idempotentReplay: json.idempotentReplay };
+    return { ...summary2, idempotentReplay: json.idempotentReplay };
   }
   /**
    * Publish a draft/sent invoice via `POST /api/invoices/{id}/publish` —
@@ -31415,13 +31415,13 @@ var CoinPayClient = class {
     if (json.emailAttempted !== false) {
       throw invalidResponse("publish endpoint reported an email attempt");
     }
-    const summary = parseInvoiceSummary(json.invoice, {
+    const summary2 = parseInvoiceSummary(json.invoice, {
       businessId: this.businessId,
       amountUsd: expected.amountUsd
     });
-    if (summary.invoiceId !== invoiceId) throw invalidResponse("published a different invoice");
-    if (summary.status !== "sent") throw invalidResponse(`status is ${summary.status}, not sent`);
-    if (summary.feeRate === null) throw invalidResponse("fee rate missing after publish");
+    if (summary2.invoiceId !== invoiceId) throw invalidResponse("published a different invoice");
+    if (summary2.status !== "sent") throw invalidResponse(`status is ${summary2.status}, not sent`);
+    if (summary2.feeRate === null) throw invalidResponse("fee rate missing after publish");
     const row = json.invoice;
     if (typeof row["payment_address"] !== "string" || row["payment_address"].trim() === "") {
       throw invalidResponse("payment address missing");
@@ -31429,13 +31429,13 @@ var CoinPayClient = class {
     if (json.paymentLink !== this.invoiceLink(invoiceId)) {
       throw invalidResponse("payment link does not match the invoice");
     }
-    const feeAmountUsd = row["fee_amount"] !== null && row["fee_amount"] !== void 0 ? decimalNumber(row["fee_amount"]) : expected.amountUsd * summary.feeRate;
+    const feeAmountUsd = row["fee_amount"] !== null && row["fee_amount"] !== void 0 ? decimalNumber(row["fee_amount"]) : expected.amountUsd * summary2.feeRate;
     if (!Number.isFinite(feeAmountUsd) || feeAmountUsd < 0 || feeAmountUsd > expected.amountUsd) {
       throw invalidResponse("invalid fee amount");
     }
     return {
-      ...summary,
-      feeRate: summary.feeRate,
+      ...summary2,
+      feeRate: summary2.feeRate,
       feeAmountUsd,
       paymentAddress: row["payment_address"],
       paymentLink: this.invoiceLink(invoiceId),
@@ -31867,6 +31867,11 @@ var DEFAULT_GITHUB_INVOICES = {
   maxAmountUsd: 1e3,
   repositoryHourlyCap: 20
 };
+var DEFAULT_CONTRIBUTION_REWARDS = {
+  enabled: false,
+  rateUsd: "0.001",
+  payment: "manual"
+};
 var DEFAULT_CONFIG = {
   enabled: true,
   defaultCrypto: "usdc_pol",
@@ -31875,6 +31880,7 @@ var DEFAULT_CONFIG = {
   requireApprovalForNonMaintainers: true,
   labels: { ...DEFAULT_LABELS },
   githubInvoices: { ...DEFAULT_GITHUB_INVOICES },
+  contributionRewards: { ...DEFAULT_CONTRIBUTION_REWARDS },
   commands: { invoice: true, approve: true, status: true, cancel: true }
 };
 function resolveDefaultCrypto(value) {
@@ -31889,12 +31895,24 @@ function resolveGithubInvoices(value) {
   const repositoryHourlyCap = typeof cap === "number" && Number.isSafeInteger(cap) && cap >= 1 && cap <= 1e3 ? cap : DEFAULT_GITHUB_INVOICES.repositoryHourlyCap;
   return { enabled: raw["enabled"] === true, maxAmountUsd, repositoryHourlyCap };
 }
+function resolveContributionRewards(value) {
+  if (value === void 0) return { ...DEFAULT_CONTRIBUTION_REWARDS };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("contributionRewards requires enabled, rateUsd and payment.");
+  }
+  const raw = value;
+  if (Object.keys(raw).sort().join(",") !== "enabled,payment,rateUsd" || typeof raw["enabled"] !== "boolean" || raw["rateUsd"] !== "0.001" || raw["payment"] !== "manual") {
+    throw new Error("contributionRewards requires boolean enabled, rateUsd: '0.001', payment: 'manual'.");
+  }
+  return { enabled: raw["enabled"], rateUsd: "0.001", payment: "manual" };
+}
 function resolveConfig(partial) {
   if (!partial) {
     return {
       ...DEFAULT_CONFIG,
       labels: { ...DEFAULT_LABELS },
-      githubInvoices: { ...DEFAULT_GITHUB_INVOICES }
+      githubInvoices: { ...DEFAULT_GITHUB_INVOICES },
+      contributionRewards: { ...DEFAULT_CONTRIBUTION_REWARDS }
     };
   }
   return {
@@ -31905,6 +31923,7 @@ function resolveConfig(partial) {
     requireApprovalForNonMaintainers: partial.requireApprovalForNonMaintainers ?? DEFAULT_CONFIG.requireApprovalForNonMaintainers,
     labels: { ...DEFAULT_LABELS, ...partial.labels ?? {} },
     githubInvoices: resolveGithubInvoices(partial.githubInvoices),
+    contributionRewards: resolveContributionRewards(partial.contributionRewards),
     commands: { ...DEFAULT_CONFIG.commands, ...partial.commands ?? {} }
   };
 }
@@ -32644,6 +32663,259 @@ function friendlyError(err) {
   return "An unexpected error occurred while creating the payment.";
 }
 
+// src/contributions.ts
+var CONTRIBUTIONS_ORIGIN = "https://coinpayportal.com";
+var CONTRIBUTIONS_AUDIENCE = "coinpayportal.com";
+var ROOT = "/api/github/contributions";
+var UINT = /^(0|[1-9][0-9]{0,39})$/;
+var UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+var ContributionError = class extends Error {
+  constructor(code, status = 0) {
+    super(`CoinPay contribution request failed (${code}).`);
+    this.code = code;
+    this.status = status;
+  }
+};
+function object(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ContributionError("INVALID_RESPONSE");
+  return value;
+}
+function integer(value) {
+  if (typeof value !== "string" || !UINT.test(value)) throw new ContributionError("INVALID_RESPONSE");
+  return value;
+}
+function parseBalance(value) {
+  const raw = object(value);
+  if (raw["currency"] !== "USD") throw new ContributionError("INVALID_RESPONSE");
+  const balance = {
+    currency: "USD",
+    reserved_mills: integer(raw["reserved_mills"]),
+    paid_mills: integer(raw["paid_mills"]),
+    accrued_mills: integer(raw["accrued_mills"]),
+    available_mills: integer(raw["available_mills"]),
+    payable_cents: integer(raw["payable_cents"]),
+    remainder_mills: integer(raw["remainder_mills"])
+  };
+  const available = BigInt(balance.available_mills);
+  if (available + BigInt(balance.reserved_mills) + BigInt(balance.paid_mills) !== BigInt(balance.accrued_mills) || BigInt(balance.payable_cents) !== available / 10n || BigInt(balance.remainder_mills) !== available % 10n) throw new ContributionError("INVALID_RESPONSE");
+  return balance;
+}
+function millsUsd(value) {
+  const mills = BigInt(integer(value));
+  return `${mills / 1000n}.${String(mills % 1000n).padStart(3, "0")}`;
+}
+function centsUsd(value) {
+  const cents = BigInt(integer(value));
+  return `${cents / 100n}.${String(cents % 100n).padStart(2, "0")}`;
+}
+function settlement(value) {
+  const raw = object(value);
+  if (typeof raw["id"] !== "string" || !UUID.test(raw["id"]) || raw["currency"] !== "USD" || typeof raw["contributor_id"] !== "string" || !/^[1-9][0-9]{0,19}$/.test(raw["contributor_id"]) || !["reserved", "awaiting_payment", "paid"].includes(String(raw["status"]))) throw new ContributionError("INVALID_RESPONSE");
+  const amount = integer(raw["amount_cents"]);
+  if (amount === "0") throw new ContributionError("INVALID_RESPONSE");
+  let url = null;
+  if (raw["payment_url"] !== null && raw["payment_url"] !== void 0) {
+    if (typeof raw["payment_url"] !== "string") throw new ContributionError("INVALID_RESPONSE");
+    try {
+      const parsed = new URL(raw["payment_url"]);
+      if (parsed.origin !== CONTRIBUTIONS_ORIGIN || parsed.username || parsed.password || !parsed.pathname.startsWith("/pay/") || !UUID.test(parsed.pathname.slice(5)) || parsed.search || parsed.hash) throw new Error();
+      url = parsed.href;
+    } catch {
+      throw new ContributionError("INVALID_RESPONSE");
+    }
+  }
+  if (url && (raw["status"] !== "awaiting_payment" || raw["payment_status"] !== "pending")) throw new ContributionError("INVALID_RESPONSE");
+  return {
+    id: raw["id"],
+    contributor_id: raw["contributor_id"],
+    currency: "USD",
+    status: raw["status"],
+    amount_cents: amount,
+    payment_url: url,
+    payment_status: typeof raw["payment_status"] === "string" ? raw["payment_status"].slice(0, 64) : null
+  };
+}
+var ContributionClient = class {
+  constructor(apiKey, fetcher = fetch) {
+    this.apiKey = apiKey;
+    this.fetcher = fetcher;
+  }
+  async request(path, body, oidc) {
+    if (body && (!oidc || /[\r\n]/.test(oidc))) throw new ContributionError("OIDC_REQUIRED");
+    let response;
+    try {
+      response = await this.fetcher(CONTRIBUTIONS_ORIGIN + ROOT + path, {
+        method: body ? "POST" : "GET",
+        redirect: "error",
+        signal: AbortSignal.timeout(3e4),
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          Accept: "application/json",
+          ...body ? { "Content-Type": "application/json", "X-GitHub-Actions-Token": oidc } : {}
+        },
+        ...body ? { body: JSON.stringify(body) } : {}
+      });
+    } catch {
+      throw new ContributionError("TRANSPORT_UNAVAILABLE");
+    }
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new ContributionError(response.status === 409 ? "CONFLICT_OR_PRE_ENROLLMENT" : response.status === 401 || response.status === 403 ? "AUTHORIZATION_FAILED" : "UPSTREAM_UNAVAILABLE", response.status);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) throw new ContributionError("INVALID_RESPONSE");
+    const chunks = [];
+    let size = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 64 * 1024) {
+          await reader.cancel();
+          throw new ContributionError("INVALID_RESPONSE");
+        }
+        chunks.push(value);
+      }
+    } catch (error) {
+      if (error instanceof ContributionError) throw error;
+      throw new ContributionError("TRANSPORT_UNAVAILABLE");
+    }
+    let raw;
+    try {
+      raw = object(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    } catch {
+      throw new ContributionError("INVALID_RESPONSE");
+    }
+    if (raw["success"] !== true) throw new ContributionError("INVALID_RESPONSE");
+    return raw;
+  }
+  async accrue(identity, oidc) {
+    const raw = await this.request("/accrue", identity, oidc);
+    const contribution = object(raw["contribution"]);
+    if (contribution["amount_mills"] !== "1" || contribution["currency"] !== "USD" || typeof raw["replayed"] !== "boolean") {
+      throw new ContributionError("INVALID_RESPONSE");
+    }
+    return { replayed: raw["replayed"], balance: parseBalance(raw["balance"]) };
+  }
+  async balance(repositoryId, contributorId) {
+    const query = new URLSearchParams({ repository_id: repositoryId, contributor_id: contributorId });
+    return parseBalance((await this.request("/balance?" + query)).balance);
+  }
+  async settle(body, oidc) {
+    const raw = await this.request("/settlements", body, oidc);
+    const balance = parseBalance(raw["balance"]);
+    if (raw["settlement"] === null) {
+      if (raw["code"] !== "BELOW_CENT" || BigInt(balance.available_mills) >= 10n) throw new ContributionError("INVALID_RESPONSE");
+      return { settlement: null, balance };
+    }
+    const parsed = settlement(raw["settlement"]);
+    if (parsed.contributor_id !== body.contributor_id) throw new ContributionError("INVALID_RESPONSE");
+    return { settlement: parsed, balance };
+  }
+};
+
+// src/contribution-handler.ts
+function parseContributionCommand(body) {
+  if (!/^\/coinpay (?:balance|settle)(?:\s|$)/.test(body)) return null;
+  if (/^\/coinpay balance\s*$/.test(body)) return { kind: "balance" };
+  const match = /^\/coinpay settle --wallet ([A-Za-z0-9:_-]{10,256}) --blockchain ([A-Z][A-Z0-9_]{1,15})\s*$/.exec(body);
+  if (match && !body.trim().includes("\n") && SUPPORTED_CRYPTO.has(match[2].toLowerCase())) {
+    return { kind: "settle", wallet: match[1], blockchain: match[2] };
+  }
+  return { kind: "invalid" };
+}
+function githubId(value) {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return String(value);
+  if (typeof value === "string" && /^[1-9][0-9]{0,19}$/.test(value)) return value;
+  throw new ContributionError("INVALID_GITHUB_IDENTITY");
+}
+function summary(balance) {
+  return `Accrued: $${millsUsd(balance.accrued_mills)} USD. Reserved: $${millsUsd(balance.reserved_mills)} USD. Paid: $${millsUsd(balance.paid_mills)} USD. Available: $${millsUsd(balance.available_mills)} USD. Whole cents available for manual payment: $${centsUsd(balance.payable_cents)} USD; ${balance.remainder_mills} mill(s) remain below one cent. Ten merged PRs earn one cent. Amounts are nominal rewards; checkout fees and the actual recipient amount are shown before payment.`;
+}
+async function currentIdentity(evt, octokit, requireMerged) {
+  if (!Number.isSafeInteger(evt.ref.issueNumber) || evt.ref.issueNumber <= 0) throw new ContributionError("INVALID_GITHUB_IDENTITY");
+  const { data: pull } = await octokit.rest.pulls.get({ owner: evt.ref.owner, repo: evt.ref.repo, pull_number: evt.ref.issueNumber });
+  const repository = pull.base.repo;
+  if (!repository || githubId(repository.id) !== githubId(evt.repositoryId) || repository.full_name.toLowerCase() !== `${evt.ref.owner}/${evt.ref.repo}`.toLowerCase() || pull.number !== evt.ref.issueNumber || !repository.owner || !pull.user) throw new ContributionError("INVALID_GITHUB_IDENTITY");
+  if (requireMerged && (pull.merged !== true || pull.state !== "closed" || typeof pull.merged_at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(pull.merged_at) || !Number.isFinite(Date.parse(pull.merged_at)) || ![new Date(pull.merged_at).toISOString(), new Date(pull.merged_at).toISOString().replace(".000Z", "Z")].includes(pull.merged_at) || !/^[a-f0-9]{40}$/.test(pull.merge_commit_sha ?? ""))) {
+    throw new ContributionError("PULL_REQUEST_NOT_MERGED");
+  }
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?(?:\[bot\])?$/i.test(pull.user.login)) throw new ContributionError("INVALID_GITHUB_IDENTITY");
+  return {
+    repository_id: githubId(repository.id),
+    repository_owner_id: githubId(repository.owner.id),
+    repository_full_name: repository.full_name,
+    pull_request_id: githubId(pull.id),
+    pull_request_number: pull.number,
+    contributor_id: githubId(pull.user.id),
+    contributor_login: pull.user.login,
+    merged_at: pull.merged_at ?? "",
+    merge_commit_sha: pull.merge_commit_sha ?? ""
+  };
+}
+async function handleContribution(evt, deps) {
+  const isMerge = evt.eventName === "pull_request_target" && evt.action === "closed" && evt.merged === true;
+  const isComment = evt.eventName === "issue_comment" && evt.action === "created" && evt.comment?.type === "User";
+  const candidate = evt.comment ? parseContributionCommand(evt.comment.body) : null;
+  if (candidate && !isComment) return { action: "skipped" };
+  const command = isComment ? candidate : null;
+  if (!isMerge && !command) return evt.eventName === "pull_request_target" ? { action: "skipped" } : null;
+  if (deps.config.enabled !== true || !deps.config.contributionRewards.enabled) return { action: "noop_disabled" };
+  let marker = "";
+  if (command) {
+    const actor = evt.comment;
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/i.test(actor.login)) return { action: "skipped", detail: "not_current_maintainer" };
+    try {
+      const { data } = await deps.octokit.rest.repos.getCollaboratorPermissionLevel({ owner: evt.ref.owner, repo: evt.ref.repo, username: actor.login });
+      if (!["write", "maintain", "admin"].includes(data.permission)) return { action: "skipped", detail: "not_current_maintainer" };
+    } catch {
+      return { action: "skipped", detail: "permission_lookup_failed" };
+    }
+    marker = `<!-- coinpay-contribution-comment:${githubId(actor.id)} -->`;
+    const comments = await deps.github.listComments(evt.ref);
+    if (comments.some((c) => isTrustedAuthor(c) && c.body.includes(marker))) return { action: "noop_duplicate" };
+    if (command.kind === "invalid") {
+      await deps.github.createComment(evt.ref, "Use `/coinpay balance` or `/coinpay settle --wallet <verified-address> --blockchain USDC_POL`. Settlement requires an explicitly verified recipient address and chain.\n\n" + marker);
+      return { action: "error", detail: "invalid_contribution_command" };
+    }
+  }
+  try {
+    const identity = await currentIdentity(evt, deps.octokit, isMerge);
+    if (isMerge) {
+      const result = await deps.ledger.accrue(identity, await deps.getIdToken(CONTRIBUTIONS_AUDIENCE));
+      return { action: result.replayed ? "contribution_already_accrued" : "contribution_accrued" };
+    }
+    if (command?.kind === "balance") {
+      const balance = await deps.ledger.balance(identity.repository_id, identity.contributor_id);
+      await deps.github.createComment(evt.ref, summary(balance) + "\n\n" + marker);
+      return { action: "contribution_balance" };
+    }
+    if (command?.kind === "settle") {
+      const { settlement: settlement2, balance } = await deps.ledger.settle({
+        repository_id: identity.repository_id,
+        repository_owner_id: identity.repository_owner_id,
+        repository_full_name: identity.repository_full_name,
+        contributor_id: identity.contributor_id,
+        recipient_wallet: command.wallet,
+        blockchain: command.blockchain,
+        idempotency_key: "github-comment:" + githubId(evt.comment.id)
+      }, await deps.getIdToken(CONTRIBUTIONS_AUDIENCE));
+      if (settlement2 && settlement2.contributor_id !== identity.contributor_id) throw new ContributionError("INVALID_RESPONSE");
+      const status = !settlement2 ? "No checkout was created: the available reward is below one cent." : settlement2.status === "paid" ? `The ledger confirms the $${centsUsd(settlement2.amount_cents)} USD settlement is paid.` : `Reserved $${centsUsd(settlement2.amount_cents)} USD for manual payment. ` + (settlement2.payment_url ? `[Open the CoinPay checkout](${settlement2.payment_url}). Review the chain, recipient and fee before paying.` : settlement2.status === "reserved" && !settlement2.payment_status ? "Checkout is still being prepared. Re-run this same Action attempt to retry the same reservation; do not change its wallet or chain." : "This payment has no active checkout link and remains reserved until forwarding is verified. Use `/coinpay balance` to reconcile its status; do not send a duplicate payment.");
+      const complete = !settlement2 || settlement2.status === "paid" || Boolean(settlement2.payment_url);
+      await deps.github.createComment(evt.ref, status + "\n\n" + summary(balance) + (complete ? "\n\n" + marker : ""));
+      return { action: complete ? "contribution_settlement" : "contribution_settlement_pending" };
+    }
+  } catch (error) {
+    const code = error instanceof ContributionError ? error.code : "CONTRIBUTION_UNAVAILABLE";
+    if (!command) throw new ContributionError(code);
+    await deps.github.createComment(evt.ref, "CoinPay could not complete this contribution request. No payment is confirmed. Check repository enrollment/scoped credentials and the Actions run. If a settlement was reserved, retry the same Action attempt with unchanged terms.");
+    throw new ContributionError(code);
+  }
+  return { action: "skipped" };
+}
+
 // src/main.ts
 async function loadRepoConfig(gh, token, ref) {
   try {
@@ -32658,18 +32930,23 @@ async function loadRepoConfig(gh, token, ref) {
       const yaml = Buffer.from(data.content, "base64").toString("utf8");
       return resolveConfig((0, import_yaml.parse)(yaml));
     }
-  } catch {
+  } catch (error) {
+    if (error.status !== 404) {
+      throw new Error("Could not safely read the default-branch CoinPay configuration.");
+    }
   }
   return resolveConfig();
 }
 async function run() {
   const eventName = github2.context.eventName;
-  if (eventName !== "issue_comment") {
+  if (eventName !== "issue_comment" && eventName !== "pull_request_target") {
     core.info(`Ignoring event: ${eventName}`);
     return;
   }
   const payload = github2.context.payload;
-  if (payload.action !== "created" || !payload.comment || !payload.issue) {
+  const mergeEvent = eventName === "pull_request_target" && payload.action === "closed" && payload.pull_request?.merged === true;
+  const commentEvent = eventName === "issue_comment" && payload.action === "created" && payload.comment && payload.issue;
+  if (!mergeEvent && !commentEvent) {
     core.info("Not a created issue comment; nothing to do.");
     return;
   }
@@ -32681,10 +32958,36 @@ async function run() {
   const ref = {
     owner: github2.context.repo.owner,
     repo: github2.context.repo.repo,
-    issueNumber: payload.issue.number
+    issueNumber: mergeEvent ? payload.pull_request.number : payload.issue.number
   };
   const gh = new OctokitGitHubClient(token, trustedCommentAuthor);
   const config = await loadRepoConfig(gh, token, ref);
+  if (mergeEvent || payload.issue?.pull_request) {
+    const contribution = await handleContribution({
+      eventName,
+      action: payload.action,
+      ref,
+      repositoryId: payload.repository?.id,
+      merged: mergeEvent,
+      ...commentEvent ? { comment: {
+        id: payload.comment.id,
+        body: payload.comment.body ?? "",
+        login: payload.comment.user?.login ?? "",
+        type: payload.comment.user?.type ?? ""
+      } } : {}
+    }, {
+      config,
+      github: gh,
+      octokit: github2.getOctokit(token),
+      ledger: new ContributionClient(apiKey),
+      getIdToken: (audience) => core.getIDToken(audience)
+    });
+    if (contribution) {
+      core.info(`coinpaybot action=${contribution.action}`);
+      core.setOutput("action", contribution.action);
+      return;
+    }
+  }
   const coinpay = new CoinPayClient({ baseUrl, apiKey, businessId });
   const evt = {
     ref,

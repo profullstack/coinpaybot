@@ -1,5 +1,5 @@
-name: 'CoinPayPortal invoice command'
-description: 'Create CoinPayPortal crypto invoices and payment links from GitHub issue and PR comments.'
+name: 'CoinPayPortal PR contributions and invoice commands'
+description: 'Track opted-in merged PR contributions and create manual contributor checkouts or invoice commands.'
 author: 'profullstack'
 branding:
   icon: 'dollar-sign'
@@ -10,7 +10,7 @@ inputs:
     required: true
     default: ${{ github.token }}
   coinpay-api-key:
-    description: 'CoinPayPortal API key (cp_live_...). Store as a repository secret.'
+    description: 'CoinPayPortal API key (cp_live_...). Contributions require a dedicated repository-bound scoped key; legacy invoice commands need separate merchant permissions.'
     required: true
   coinpay-business-id:
     description: 'CoinPayPortal business id that owns the receiving wallet.'
