@@ -84,7 +84,7 @@ jobs:
       # Runs the reviewed action only; never checks out or executes PR code.
       - name: Run CoinPay command
         if: steps.authorization.outputs.allowed == 'true' && steps.setup.outputs.configured == 'true'
-        uses: profullstack/coinpaybot@fbf099175de2d8f6ed105b20d677e7a30b19cfac
+        uses: profullstack/coinpaybot@f5a6996c43c7a825658a3daa3b0d9343e3bce11f
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           coinpay-api-key: ${{ secrets.COINPAY_API_KEY }}
