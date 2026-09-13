@@ -21,6 +21,7 @@ jobs:
   coinpay:
     if: github.event.issue.pull_request && github.event.comment.user.type == 'User' && startsWith(github.event.comment.body, '/coinpay ')
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Verify repository permission
         id: authorization

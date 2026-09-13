@@ -103,6 +103,7 @@ test('financial workflow uses immutable actions, both gates, and no PR checkout'
   assert.match(workflow, /if: steps\.authorization\.outputs\.allowed == 'true' && steps\.setup\.outputs\.configured == 'true'/);
   assert.ok(!workflow.includes('actions/checkout@'));
   assert.ok(!workflow.includes('pull_request_target:'));
+  assert.match(workflow, /timeout-minutes: 5/);
   assert.match(config, /githubInvoices:\s*\n\s+enabled: false/);
 });
 
