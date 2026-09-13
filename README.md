@@ -14,6 +14,12 @@ This repository is the **GitHub Action MVP** (PRD Phase 1). It runs on `issue_co
 
 ## Quick start
 
+For maintainer-controlled contribution payments across repositories, use the
+[shared PR workflow](docs/pr-commands.md). A small pinned caller adds current
+repository permission checks and setup checks without copying that logic into
+each repository. The direct Action setup below also supports general issue
+commands and contributor request flows.
+
 1. In CoinPayPortal, create an API key (`cp_live_...`) and note your **business id**. Make sure the business has a **receiving wallet configured for the crypto you invoice in** (e.g. `usdc_pol`) — without one, payment creation fails (see [Limitations](#limitations)).
 2. Add repository secrets `COINPAY_API_KEY` and `COINPAY_BUSINESS_ID`.
 3. Copy [`examples/coinpay-invoice.yml`](examples/coinpay-invoice.yml) to `.github/workflows/coinpay.yml`.

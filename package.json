@@ -12,8 +12,9 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:workflow": "node --test scripts/check-pr-workflow.mjs",
     "test:watch": "vitest",
-    "check": "pnpm run typecheck && pnpm run test && pnpm run build"
+    "check": "pnpm run typecheck && pnpm run test && pnpm run test:workflow && pnpm run build"
   },
   "dependencies": {
     "@actions/core": "^1.11.1",

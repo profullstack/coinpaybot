@@ -1,0 +1,19 @@
+# Copy to .github/workflows/coinpay.yml and replace REVIEWED_COMMIT_SHA
+# with a reviewed 40-character commit that contains pr-commands.yml.
+name: CoinPay PR commands
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  coinpay:
+    uses: profullstack/coinpaybot/.github/workflows/pr-commands.yml@REVIEWED_COMMIT_SHA
+    secrets:
+      COINPAY_API_KEY: ${{ secrets.COINPAY_API_KEY }}
+      COINPAY_BUSINESS_ID: ${{ secrets.COINPAY_BUSINESS_ID }}
