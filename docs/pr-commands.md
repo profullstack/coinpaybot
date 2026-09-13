@@ -1,78 +1,71 @@
-# Shared workflow for manual PR commands
+# Merged PR rewards and manual payments
 
-The reusable [PR workflow](../.github/workflows/pr-commands.yml) runs CoinPay
-commands only for new human-authored PR comments whose author currently has
-GitHub **write, maintain, or admin permission** on the calling repository.
-This additional gate verifies permissions with GitHub instead of trusting
-`author_association` alone. Permission lookup failure stops the action.
+An enrolled repository can accrue **$0.001 USD per merged PR**, grouped by repository and contributor. The portal stores one integer mill for each qualifying merge. **Ten merged PRs earn one cent.** Replaying a workflow run does not earn a second reward. Only merges after the repository's enrollment cutoff qualify; installation does not backfill old PRs.
 
-Each repository needs a small caller, its own configuration and approved
-credentials. The common job, permission/setup checks and tests stay here.
-Application source, automatic PR rates and automatic billing events are unchanged.
+The bot records an amount owed. It does not automatically pay contributors. A maintainer explicitly supplies a verified wallet and chain to reserve whole cents, then pays through CoinPay checkout. Fractions below one cent remain in the ledger. The nominal reward is not a promise of the recipient's net amount: checkout shows the crypto quote and fees before payment.
 
-## Install
+## Install after the portal ledger is deployed
 
-Copy [the caller example](../examples/coinpay-pr-commands.yml) to the repository's
-`.github/workflows/coinpay.yml`. Replace `REVIEWED_COMMIT_SHA` with a reviewed full
-40-character commit containing this reusable workflow. Do not use the older `v0`
-tag: it predates this workflow and the newer PR payment commands.
+The merchant first enrolls the repository in CoinPayPortal and obtains a dedicated repository-bound key with contribution scopes. The portal must allowlist the exact reviewed reusable workflow ref and SHA in `GITHUB_CONTRIBUTIONS_WORKFLOW_PINS`. Unenrolled repositories, old generic keys and unapproved workflow pins fail closed.
 
-Pass only the two named secrets, `COINPAY_API_KEY` and `COINPAY_BUSINESS_ID`, from
-repository secrets or organization secrets available to that repository. The
-workflow automatically uses the caller's `GITHUB_TOKEN`; it never checks out or
-executes the PR's code. Missing CoinPay credentials produce a setup notice in the
-Actions run and skip the action. This is not proof that live invoicing works.
+Store the dedicated credentials in **new** consumer-repository secrets:
 
-Keep `.github/coinpay.yml` on the caller's default branch:
+- `COINPAY_CONTRIBUTIONS_KEY`
+- `COINPAY_CONTRIBUTIONS_BUSINESS_ID`
+
+These preserve existing `COINPAY_API_KEY` and `COINPAY_BUSINESS_ID` secrets which another application or deployment may use. Copy [the caller](../examples/coinpay-pr-commands.yml) to `.github/workflows/coinpay.yml`, replace `REVIEWED_COMMIT_SHA` with the reviewed full 40-character workflow commit, and retain the mapping from the new secret names to the reusable workflow's existing `COINPAY_API_KEY` and `COINPAY_BUSINESS_ID` inputs.
+
+The caller listens to `pull_request_target: closed` and `issue_comment: created`, with `id-token: write` and the documented GitHub read/comment permissions. The called job runs only the immutable reviewed Action bundle. It never checks out the PR head, executes PR code or evaluates comment text as code.
+
+Put this exact opt-in on the default branch at `.github/coinpay.yml`:
 
 ```yaml
 enabled: true
-defaultFiat: USD
-defaultCrypto: usdc_pol
-minRoleToCreateInvoice: collaborator
-requireApprovalForNonMaintainers: true
+contributionRewards:
+  enabled: true
+  rateUsd: '0.001'
+  payment: manual
 githubInvoices:
   enabled: false
 ```
 
-The `collaborator` association setting does not bypass the reusable workflow's
-current-write-permission lookup. The upstream formal `@payer` invoice feature
-remains disabled; its business-issued invoice does not link contributor accounts.
-The reusable workflow inherits the caller's event/repository context and reads
-that repository's configuration. It ignores bots, edited comments, issue-only
-threads and non-command text. Only the called job sets its per-PR concurrency
-group; callers need not duplicate it.
+The quoted rate is intentional. Numeric `0.001`, different rates, extra reward settings and automatic payment modes are rejected. Omitting `contributionRewards` leaves accrual disabled. To turn it off, retain the same rate/payment settings and set its `enabled` to `false`, or set global `enabled` to `false`.
 
-## Explicit contribution payments
+## Contributor commands
 
-After independently verifying the contributor's receiving address and agreed
-amount, a maintainer comments on the PR:
+On a PR, a human with **current write, maintain or admin permission** can run:
 
 ```text
-/coinpay create 25 USD --crypto usdc_pol --wallet <verified-contributor-address> --dry-run
+/coinpay balance
+/coinpay settle --wallet <verified-contributor-address> --blockchain USDC_POL
 ```
 
-The amount is an example, not a default rate. Preview posts a GitHub reply but
-makes no CoinPay API call. After reviewing it, the maintainer posts a new command
-without `--dry-run` to create the payment link. The owner then pays through that
-link; the bot does not transfer funds. Verify the settlement chain and platform
-fee before payment.
+Balance is for this PR's current author within this repository. It shows accrued, reserved, paid and available mills, whole cents payable and the remaining fraction. It reconciles any outstanding settlement against the existing payment record, without creating a checkout. Only verified forwarding with transaction proof counts as paid.
 
-The explicit wallet determines the recipient. A legacy `/coinpay invoice`
-command without a wallet defaults to the configured business wallet, so it must
-not be presented as contributor payment. Numeric PR commands create payment
-resources, not formal invoice records. Current deduplication covers identical
-PR/amount/coin/wallet terms; it does not establish one entitlement per PR across
-changed terms or repository renames. Automatic PR rates, contributor account
-linking, and invoice entitlement tracking require separate changes.
+Before settlement, independently verify the author's receiving wallet and specific blockchain/token. Both command fields are required; the bot never copies a wallet from a profile, PR body or another comment. `USDC_POL` is an example uppercase CoinPay code. No amount is accepted: the portal atomically reserves the available whole cents. Below ten available mills, it creates no checkout.
 
-## Checks
+Settlement replies say **reserved** or **awaiting payment** until the portal verifies payment. Open the returned `https://coinpayportal.com/pay/<id>` checkout, review its recipient, chain, quote and fee, and pay manually. Creating a checkout does not broadcast an outgoing wallet transaction or create a merchant receivable invoice.
 
-`pnpm run test:workflow` executes the actual inline authorization/setup scripts
-against mocked permissions and fake credentials. It makes no network requests
-and creates no comments, invoices or payments. CI runs it alongside the existing
-action tests and committed-bundle verification. Consumer repositories do not need
-copies of those tests.
+A failed or incomplete checkout can leave its amount reserved. Re-run the **same Actions attempt**, retaining its immutable comment ID and unchanged wallet/chain. Posting a new comment creates a different idempotency key; changing terms while an unresolved reservation exists is rejected. A timeout, payment link or pending state is not payment proof. The portal's verified settlement record is the authority for status.
 
-GitHub documents the [caller context and permission limits](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#github-context)
-and [immutable workflow references](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows).
+An expired checkout or a payment awaiting forwarding has no active payment link and keeps its reservation. Use `/coinpay balance` to reconcile progress; do not send a duplicate payment. An expired or failed forwarding record needs portal resolution before its funds can become available again.
+
+To recover a failed accrual, re-run the **original merged-PR Actions run** after resolving its setup or service error. The current PR identity is checked again and a recorded merge is not counted twice. This recovers an existing event; it does not backfill historical PRs or bypass the enrollment cutoff. A merge without an original Actions run cannot be recovered by inventing a comment command.
+
+## Trust and accounting
+
+Both workflow and Action freshly read the PR through GitHub, verify its base repository, and require a closed, merged PR for accrual. Repository, owner, PR and contributor IDs are decimal strings; no caller-supplied rate or amount reaches the accrue endpoint. The portal enforces enrollment, cutoff and atomic event uniqueness.
+
+Writes use the dedicated scoped key plus GitHub OIDC with audience `coinpayportal.com`. The portal checks GitHub's issuer, repository binding and approved `job_workflow_ref` / `job_workflow_sha`. Balance uses the same bound key without OIDC. The client accepts only `https://coinpayportal.com`, rejects redirects and caps response size.
+
+Contribution commands require a fresh permission lookup; `author_association` alone never authorizes them. Bots and edited comments cannot settle. GitHub bot authors can accrue when their PR is actually merged; immutable contributor identity owns the balance.
+
+Only the two named credentials are passed, never `secrets: inherit`. Keys, OIDC tokens and recipient addresses do not appear in replies or diagnostics. Missing setup produces an Actions notice; it does not prove enrollment or production payment readiness.
+
+## Legacy invoice commands
+
+The Action still supports separate invoice/payment commands described in the [README](../README.md). Dedicated contribution keys authorize accrual, balance and manual settlement only. They do **not** grant generic merchant payment/invoice access; legacy commands require separate credentials with their own permissions. Keep formal `githubInvoices` disabled for this rollout. Neither a legacy invoice nor a standalone payment counts as ledger reward settlement.
+
+## Validation
+
+`test:workflow` executes the actual reusable-workflow scripts against adversarial GitHub fixtures. Action tests cover strict config, current identity/permission, fixed transport, integer arithmetic and retry behavior. After `build`, `test:bundle` executes the actual committed `dist/index.js` for accrual, replay, balance, settlement and rejection paths with all real network connections denied. These checks create no production comments, ledger entries or payments.

@@ -5,15 +5,18 @@ name: CoinPay PR commands
 on:
   issue_comment:
     types: [created]
+  pull_request_target:
+    types: [closed]
 
 permissions:
   contents: read
   issues: write
   pull-requests: write
+  id-token: write
 
 jobs:
   coinpay:
     uses: profullstack/coinpaybot/.github/workflows/pr-commands.yml@REVIEWED_COMMIT_SHA
     secrets:
-      COINPAY_API_KEY: ${{ secrets.COINPAY_API_KEY }}
-      COINPAY_BUSINESS_ID: ${{ secrets.COINPAY_BUSINESS_ID }}
+      COINPAY_API_KEY: ${{ secrets.COINPAY_CONTRIBUTIONS_KEY }}
+      COINPAY_BUSINESS_ID: ${{ secrets.COINPAY_CONTRIBUTIONS_BUSINESS_ID }}
