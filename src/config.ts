@@ -16,6 +16,8 @@ export type MinRole = 'owner' | 'member' | 'collaborator';
  */
 export interface GithubInvoiceConfig {
   enabled: boolean;
+  /** Enable only after the public invoice PDF endpoint is deployed. */
+  pdfEnabled: boolean;
   /** Upper bound for a single invoice in USD. */
   maxAmountUsd: number;
   /** Per-repository hourly invoice cap enforced atomically by CoinPayPortal (1-1000). */
@@ -68,6 +70,7 @@ export const DEFAULT_LABELS: LabelConfig = {
 
 export const DEFAULT_GITHUB_INVOICES: GithubInvoiceConfig = {
   enabled: false,
+  pdfEnabled: false,
   maxAmountUsd: 1000,
   repositoryHourlyCap: 20,
 };
@@ -115,7 +118,7 @@ function resolveGithubInvoices(value: unknown): GithubInvoiceConfig {
     typeof cap === 'number' && Number.isSafeInteger(cap) && cap >= 1 && cap <= 1000
       ? cap
       : DEFAULT_GITHUB_INVOICES.repositoryHourlyCap;
-  return { enabled: raw['enabled'] === true, maxAmountUsd, repositoryHourlyCap };
+  return { enabled: raw['enabled'] === true, pdfEnabled: raw['pdfEnabled'] === true, maxAmountUsd, repositoryHourlyCap };
 }
 
 function resolveContributionRewards(value: unknown): ContributionRewardsConfig {

@@ -199,6 +199,43 @@ function deps(gh: FakeGitHub, portal: FakePortal, config = enabledConfig()): Han
 }
 
 describe('publish-invoice happy path', () => {
+  it('adds an opted-in PDF link without making any extra API call', async () => {
+    const gh = new FakeGitHub();
+    const portal = new FakePortal();
+    const res = await handleComment(event({}), deps(gh, portal, enabledConfig({ pdfEnabled: true })));
+    expect(res.action).toBe('invoice_published');
+    expect(gh.comments[0]).toContain(`${BASE}/api/invoices/${res.invoiceId}/pdf`);
+    expect(gh.comments[0]).toContain(`${BASE}/now/${res.invoiceId}`);
+    expect(gh.comments[0]).toContain('Not a receipt');
+    expect(portal.calls).toHaveLength(2);
+    expect(portal.invoiceSeq).toBe(1);
+    await handleComment(event({}), deps(gh, portal, enabledConfig({ pdfEnabled: true })));
+    expect(portal.invoiceSeq).toBe(1);
+    expect(gh.comments).toHaveLength(1);
+  });
+
+  it('keeps the checkout reply when optional PDF derivation is unavailable', async () => {
+    const gh = new FakeGitHub();
+    const portal = new FakePortal();
+    const dependencies = deps(gh, portal, enabledConfig({ pdfEnabled: true }));
+    dependencies.coinpay.invoicePdfLink = () => null;
+    const res = await handleComment(event({}), dependencies);
+    expect(res.action).toBe('invoice_published');
+    expect(gh.comments[0]).toContain(`${BASE}/now/${res.invoiceId}`);
+    expect(gh.comments[0]).not.toContain('PDF snapshot');
+    expect(portal.invoiceSeq).toBe(1);
+    expect(portal.calls).toHaveLength(2);
+  });
+
+  it('does not generate PDF links or requests during dry run', async () => {
+    const gh = new FakeGitHub();
+    const portal = new FakePortal();
+    const res = await handleComment(event({ body: '/coinpay create @hubber 25 "Example" --dry-run' }),
+      deps(gh, portal, enabledConfig({ pdfEnabled: true })));
+    expect(res.action).toBe('dry_run');
+    expect(portal.calls).toHaveLength(0);
+    expect(gh.comments[0]).not.toContain('/pdf');
+  });
   it('creates a draft, publishes it, and posts the verified reply', async () => {
     const gh = new FakeGitHub();
     const portal = new FakePortal();
@@ -216,6 +253,7 @@ describe('publish-invoice happy path', () => {
     expect(comment).toContain('[acme/widgets#42](https://github.com/acme/widgets/issues/42)');
     expect(comment).toContain('https://coinpayportal.com/now/3f9c1e00-0000-4000-8000-000000000001');
     expect(comment).toContain('1% (0.25 USD)');
+    expect(comment).not.toContain('/pdf');
     // Honesty about issuer and payer identity, in the public reply itself.
     expect(comment).toContain('configured CoinPayPortal business');
     expect(comment).toContain('not a linked CoinPay client');

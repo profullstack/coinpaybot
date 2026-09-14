@@ -106,6 +106,7 @@ describe('Action entrypoint', () => {
     });
     // Without a repo config file, the invoice flow must resolve disabled.
     expect(deps.config.githubInvoices).toEqual({
+      pdfEnabled: false,
       enabled: false,
       maxAmountUsd: 1000,
       repositoryHourlyCap: 20,
