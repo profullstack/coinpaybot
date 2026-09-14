@@ -335,6 +335,20 @@ export class CoinPayClient {
     return `${this.baseUrl}/now/${invoiceId}`;
   }
 
+  /** Optional download link only; never fetches a PDF or retries creation. */
+  invoicePdfLink(invoiceId: string): string | null {
+    if (!UUID_RE.test(invoiceId)) return null;
+    try {
+      const base = new URL(this.baseUrl);
+      const local = ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname);
+      if ((base.protocol !== 'https:' && !(base.protocol === 'http:' && local)) ||
+          base.username || base.password || base.search || base.hash || base.pathname !== '/') return null;
+      return new URL(`/api/invoices/${invoiceId}/pdf`, base).href;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Create a draft invoice via the idempotent `POST /api/invoices` contract.
    * The business's configured payee is used — this request never names a

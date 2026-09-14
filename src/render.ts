@@ -237,6 +237,7 @@ function fmtFee(feeRate: number, feeAmountUsd: number): string {
 export function githubInvoiceSuccessComment(args: {
   payer: string; actor: string; amount: number; description: string;
   invoiceNumber: string; paymentLink: string; feeRate: number; feeAmountUsd: number;
+  pdfLink?: string;
   threadUrl: string; threadLabel: string; handledCommentId: number;
 }): string {
   return [
@@ -251,6 +252,11 @@ export function githubInvoiceSuccessComment(args: {
     `**Platform fee:** ${fmtFee(args.feeRate, args.feeAmountUsd)}`,
     '',
     `**Pay here:** ${cleanSummaryText(args.paymentLink)}`,
+    ...(args.pdfLink ? [
+      '',
+      `**PDF snapshot:** ${cleanSummaryText(args.pdfLink)}`,
+      '_Not a receipt. Use the live invoice above for current status, or if the PDF is unavailable._',
+    ] : []),
     '',
     `_Requested by @${cleanSummaryText(args.actor)}_`,
     ISSUER_DISCLOSURE,

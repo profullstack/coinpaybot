@@ -31359,6 +31359,18 @@ var CoinPayClient = class {
   invoiceLink(invoiceId) {
     return `${this.baseUrl}/now/${invoiceId}`;
   }
+  /** Optional download link only; never fetches a PDF or retries creation. */
+  invoicePdfLink(invoiceId) {
+    if (!UUID_RE.test(invoiceId)) return null;
+    try {
+      const base = new URL(this.baseUrl);
+      const local = ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname);
+      if (base.protocol !== "https:" && !(base.protocol === "http:" && local) || base.username || base.password || base.search || base.hash || base.pathname !== "/") return null;
+      return new URL(`/api/invoices/${invoiceId}/pdf`, base).href;
+    } catch {
+      return null;
+    }
+  }
   /**
    * Create a draft invoice via the idempotent `POST /api/invoices` contract.
    * The business's configured payee is used — this request never names a
@@ -31864,6 +31876,7 @@ var DEFAULT_LABELS = {
 };
 var DEFAULT_GITHUB_INVOICES = {
   enabled: false,
+  pdfEnabled: false,
   maxAmountUsd: 1e3,
   repositoryHourlyCap: 20
 };
@@ -31893,7 +31906,7 @@ function resolveGithubInvoices(value) {
   const maxAmountUsd = isCanonicalUsdAmount(raw["maxAmountUsd"]) ? raw["maxAmountUsd"] : DEFAULT_GITHUB_INVOICES.maxAmountUsd;
   const cap = raw["repositoryHourlyCap"];
   const repositoryHourlyCap = typeof cap === "number" && Number.isSafeInteger(cap) && cap >= 1 && cap <= 1e3 ? cap : DEFAULT_GITHUB_INVOICES.repositoryHourlyCap;
-  return { enabled: raw["enabled"] === true, maxAmountUsd, repositoryHourlyCap };
+  return { enabled: raw["enabled"] === true, pdfEnabled: raw["pdfEnabled"] === true, maxAmountUsd, repositoryHourlyCap };
 }
 function resolveContributionRewards(value) {
   if (value === void 0) return { ...DEFAULT_CONTRIBUTION_REWARDS };
@@ -32113,6 +32126,11 @@ function githubInvoiceSuccessComment(args) {
     `**Platform fee:** ${fmtFee(args.feeRate, args.feeAmountUsd)}`,
     "",
     `**Pay here:** ${cleanSummaryText(args.paymentLink)}`,
+    ...args.pdfLink ? [
+      "",
+      `**PDF snapshot:** ${cleanSummaryText(args.pdfLink)}`,
+      "_Not a receipt. Use the live invoice above for current status, or if the PDF is unavailable._"
+    ] : [],
     "",
     `_Requested by @${cleanSummaryText(args.actor)}_`,
     ISSUER_DISCLOSURE,
@@ -32476,6 +32494,7 @@ ${threadUrl}#issuecomment-${evt.commentId}`,
         description: cmd.description,
         invoiceNumber: published.invoiceNumber,
         paymentLink: published.paymentLink,
+        pdfLink: settings.pdfEnabled ? deps.coinpay.invoicePdfLink(published.invoiceId) ?? void 0 : void 0,
         feeRate: published.feeRate,
         feeAmountUsd: published.feeAmountUsd,
         threadUrl,

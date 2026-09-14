@@ -405,6 +405,7 @@ async function handlePublishInvoice(
         description: cmd.description,
         invoiceNumber: published.invoiceNumber,
         paymentLink: published.paymentLink,
+        pdfLink: settings.pdfEnabled ? deps.coinpay.invoicePdfLink(published.invoiceId) ?? undefined : undefined,
         feeRate: published.feeRate,
         feeAmountUsd: published.feeAmountUsd,
         threadUrl,

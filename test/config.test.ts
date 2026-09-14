@@ -9,6 +9,7 @@ describe('resolveConfig — githubInvoices', () => {
   it('defaults to disabled with a 1000 USD cap and hourly cap of 20', () => {
     expect(resolveConfig().githubInvoices).toEqual({
       enabled: false,
+      pdfEnabled: false,
       maxAmountUsd: 1000,
       repositoryHourlyCap: 20,
     });
@@ -29,7 +30,14 @@ describe('resolveConfig — githubInvoices', () => {
       resolveConfig({
         githubInvoices: { enabled: true, maxAmountUsd: 50.25, repositoryHourlyCap: 3 },
       } as never).githubInvoices,
-    ).toEqual({ enabled: true, maxAmountUsd: 50.25, repositoryHourlyCap: 3 });
+    ).toEqual({ enabled: true, pdfEnabled: false, maxAmountUsd: 50.25, repositoryHourlyCap: 3 });
+  });
+
+  it('enables PDF links only on literal true', () => {
+    expect(resolveConfig({ githubInvoices: { pdfEnabled: true } }).githubInvoices.pdfEnabled).toBe(true);
+    for (const value of ['true', 1, {}, null, false]) {
+      expect(resolveConfig({ githubInvoices: { pdfEnabled: value } } as never).githubInvoices.pdfEnabled).toBe(false);
+    }
   });
 
   it.each([[0], [-5], [1.001], ['100'], [Number.NaN], [Infinity], [1_000_000_000]])(

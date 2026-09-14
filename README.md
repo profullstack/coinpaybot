@@ -87,7 +87,8 @@ If `github-token` is a PAT or another token that posts as a different login, set
 
 - **A receiving wallet (or `--wallet <address>`) is required.** Crypto payment creation returns an error otherwise. The `@payer` invoice flow uses only the business's configured wallet and fails safely when none exists.
 - **No live webhook status sync.** A GitHub Action is ephemeral and cannot receive CoinPayPortal webhooks, so `coinpay:paid` / `coinpay:expired` labels and paid-status comments land with the hosted GitHub App (Phase 2), not here. In particular, `/coinpay status` never reports an invoice as paid just because it was created.
-- **No personal CoinPay accounts.** GitHub-published invoices are issued by the repository's configured business; commenter/payer account linking, client records, status webhooks, PDF output, refunds/cancellations, and multi-business routing are out of scope for this slice.
+- **Optional PDF snapshot link, default off** (`githubInvoices.pdfEnabled`). Deploy and verify CoinPayPortal's public `GET /api/invoices/{uuid}/pdf` endpoint first, then set this boolean to `true`. Published replies retain the checkout link and add a PDF download link, not a GitHub attachment. No PDF is fetched, stored or emailed by the bot; an unavailable PDF never triggers invoice creation again. Use the live invoice for current status and as the fallback. Dry runs, legacy commands and contribution rewards are unchanged. PDFs are public snapshots, not receipts, and intentionally omit notes, client details and wallet addresses.
+- **No personal CoinPay accounts.** GitHub-published invoices are issued by the repository's configured business; commenter/payer account linking, client records, status webhooks, refunds/cancellations, and multi-business routing are out of scope for this slice.
 - Card / `both` payment methods require Stripe Connect on the CoinPayPortal business.
 
 ## Development
