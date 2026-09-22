@@ -43,9 +43,23 @@
  *    idempotentReplay } and can 409 (PAYMENT_CREATION_IN_PROGRESS /
  *    INVOICE_STATE_CHANGED) requiring a retry; only draft/sent publish, a
  *    closed invoice is 400 INVOICE_NOT_PUBLISHABLE and stays closed.
+ *
+ * Invoice status GET verified at Portal c89852d18daea8a315ee2279143593cc7718d66f
+ * (2026-09-21): src/app/api/invoices/[id]/route.ts and invoice-access.ts authorize
+ * business.read using Bearer API keys and return {success:true, invoice:row}.
+ * src/app/api/invoices/route.ts stores validated numeric GitHub source fields
+ * inside metadata.source_reference; creation.ts validates positive safe IDs.
+ * The GET includes private columns, so status projects only an explicit subset.
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import {
+  INVOICE_UUID,
+  positiveId,
+  record,
+  type InvoiceReference,
+  type InvoiceStatus,
+} from './invoice-status.js';
 
 export type FetchLike = typeof fetch;
 
@@ -216,7 +230,7 @@ export interface PublishInvoiceResult extends InvoiceSummary {
   idempotentReplay: boolean;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_RE = INVOICE_UUID;
 
 function invalidResponse(detail: string): CoinPayError {
   return new CoinPayError('INVALID_RESPONSE', `Malformed CoinPayPortal invoice response: ${detail}`, 200);
@@ -450,7 +464,116 @@ export class CoinPayClient {
     };
   }
 
-  /** Fetch current payment state (drives pull-only `/coinpay status`). */
+  /** Minimal projection from the authenticated invoice read API. No private row escapes. */
+  async getInvoiceStatus(
+    reference: InvoiceReference,
+    repository: string,
+  ): Promise<InvoiceStatus> {
+    if (
+      !INVOICE_UUID.test(reference.invoiceId) ||
+      !this.invoicePdfLink(reference.invoiceId)
+    ) {
+      throw invalidResponse('invalid invoice reference or origin');
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let abort: () => void = () => {};
+    const aborted = new Promise<never>((_, reject) => {
+      abort = () => {
+        // An ignored transport abort must not leave a pending body read alive.
+        void reader?.cancel().catch(() => {});
+        reject(new CoinPayError('NETWORK', 'Invoice status unavailable', 0));
+      };
+      controller.signal.addEventListener('abort', abort, { once: true });
+    });
+    const read = async (): Promise<InvoiceStatus> => {
+      const response = await this.fetchImpl(
+        `${this.baseUrl}/api/invoices/${reference.invoiceId}`,
+        {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${this.apiKey}` },
+          signal: controller.signal,
+          redirect: 'error',
+        },
+      );
+      if (controller.signal.aborted) {
+        void response.body?.cancel().catch(() => {});
+        throw new CoinPayError('NETWORK', 'Invoice status unavailable', 0);
+      }
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => {});
+        throw new CoinPayError(
+          'UNAVAILABLE',
+          'Invoice status unavailable',
+          response.status,
+        );
+      }
+      if (!response.body) throw invalidResponse('missing body');
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let text = '',
+        size = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > 65536) throw invalidResponse('response too large');
+          text += decoder.decode(value, { stream: true });
+        }
+      } finally {
+        void reader.cancel().catch(() => {});
+      }
+      text += decoder.decode();
+      const json = record(JSON.parse(text));
+      const row = record(json.invoice);
+      const source = record(record(row.metadata).source_reference);
+      const amount = usdCents(row.amount);
+      if (
+        json.success !== true ||
+        row.id !== reference.invoiceId ||
+        row.business_id !== this.businessId ||
+        row.currency !== 'USD' ||
+        !Number.isSafeInteger(amount) ||
+        amount <= 0 ||
+        typeof row.invoice_number !== 'string' ||
+        !row.invoice_number.trim() ||
+        row.invoice_number.length > 100 ||
+        !['sent', 'overdue', 'paid'].includes(String(row.status)) ||
+        source.provider !== 'github' ||
+        typeof source.repository !== 'string' ||
+        source.repository.toLowerCase() !== repository.toLowerCase() ||
+        source.thread_number !== reference.threadNumber ||
+        source.comment_id !== reference.commentId ||
+        !positiveId(source.actor_id) ||
+        typeof row.created_at !== 'string' ||
+        !Number.isFinite(Date.parse(row.created_at))
+      ) {
+        throw invalidResponse('invoice source or public fields mismatch');
+      }
+      return {
+        ...reference,
+        invoiceNumber: row.invoice_number,
+        status: row.status as InvoiceStatus['status'],
+        amount: amount / 100,
+        currency: 'USD',
+        actorId: source.actor_id,
+        createdAt: row.created_at,
+      };
+    };
+    try {
+      return await Promise.race([read(), aborted]);
+    } catch {
+      throw new CoinPayError('UNAVAILABLE', 'Invoice status unavailable', 0);
+    } finally {
+      clearTimeout(timeout);
+      controller.signal.removeEventListener('abort', abort);
+      controller.abort();
+    }
+  }
+
+  /** Legacy payment lookup; not used by invoice status. */
   async getPayment(paymentId: string): Promise<{ status: string; raw: unknown }> {
     const res = await this.call('GET', `/api/payments/${encodeURIComponent(paymentId)}`);
     const json = (await res.json().catch(() => null)) as { payment?: any; status?: string; error?: string } | null;

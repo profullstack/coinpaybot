@@ -17,6 +17,10 @@ export interface ThreadComment {
   authorType: string;
   /** True only when the runtime matched the exact configured Action identity. */
   trustedAuthor?: boolean;
+  id?: number;
+  authorId?: number;
+  createdAt?: string;
+  issueUrl?: string;
 }
 
 export interface LinkedIssue {
@@ -37,6 +41,9 @@ export interface PullRequestContext {
 
 export interface GitHubClient {
   listComments(ref: IssueRef): Promise<ThreadComment[]>;
+  /** Bounded, numeric-identity-verified comments for read-only invoice status. */
+  listRecentComments?(ref: IssueRef): Promise<ThreadComment[]>;
+  getSourceComment?(ref: IssueRef, commentId: number): Promise<ThreadComment>;
   getPullRequestContext(ref: IssueRef): Promise<PullRequestContext | null>;
   createComment(ref: IssueRef, body: string): Promise<void>;
   addLabels(ref: IssueRef, labels: string[]): Promise<void>;
@@ -106,6 +113,82 @@ export class OctokitGitHubClient implements GitHubClient {
           authorLogin.toLowerCase() === this.trustedAuthorLogin,
       };
     });
+  }
+
+  async listRecentComments(ref: IssueRef): Promise<ThreadComment[]> {
+    if (!this.trustedAuthorLogin) throw new Error('Missing bot identity');
+    const identity = await this.octokit.rest.users.getByUsername({
+      username: this.trustedAuthorLogin,
+      request: { signal: AbortSignal.timeout(10000) },
+    });
+    if (
+      !Number.isSafeInteger(identity.data.id) ||
+      identity.data.id <= 0 ||
+      identity.data.login.toLowerCase() !== this.trustedAuthorLogin
+    ) {
+      throw new Error('Invalid bot identity');
+    }
+    const page = (number: number) =>
+      this.octokit.rest.issues.listComments({
+        owner: ref.owner,
+        repo: ref.repo,
+        issue_number: ref.issueNumber,
+        per_page: 100,
+        page: number,
+        request: { signal: AbortSignal.timeout(10000) },
+      });
+    const first = await page(1);
+    const lastLink = /<([^>]+)>;\s*rel="last"/.exec(
+      first.headers.link ?? '',
+    )?.[1];
+    const lastPage = lastLink
+      ? Number(new URL(lastLink).searchParams.get('page'))
+      : 1;
+    if (!Number.isSafeInteger(lastPage) || lastPage < 1)
+      throw new Error('Invalid comment pagination');
+    let comments = first.data;
+    if (lastPage > 1) {
+      const last = await page(lastPage);
+      const previous =
+        last.data.length < 100
+          ? (lastPage === 2 ? first : await page(lastPage - 1)).data
+          : [];
+      comments = [...previous, ...last.data];
+    }
+    return [...new Map(comments.map((c) => [c.id, c])).values()]
+      .sort((a, b) => a.id - b.id)
+      .slice(-100)
+      .map((c) => ({
+        body: c.body ?? '',
+        authorLogin: c.user?.login ?? '',
+        authorType: c.user?.type ?? '',
+        authorId: c.user?.id,
+        id: c.id,
+        createdAt: c.created_at,
+        issueUrl: c.issue_url,
+        trustedAuthor: c.user?.id === identity.data.id,
+      }));
+  }
+
+  async getSourceComment(
+    ref: IssueRef,
+    commentId: number,
+  ): Promise<ThreadComment> {
+    const { data: c } = await this.octokit.rest.issues.getComment({
+      owner: ref.owner,
+      repo: ref.repo,
+      comment_id: commentId,
+      request: { signal: AbortSignal.timeout(10000) },
+    });
+    return {
+      body: c.body ?? '',
+      id: c.id,
+      authorId: c.user?.id,
+      authorLogin: c.user?.login ?? '',
+      authorType: c.user?.type ?? '',
+      createdAt: c.created_at,
+      issueUrl: c.issue_url,
+    };
   }
 
   async getPullRequestContext(ref: IssueRef): Promise<PullRequestContext | null> {

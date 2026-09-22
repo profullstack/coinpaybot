@@ -2,6 +2,10 @@
 
 Track merged-PR contribution rewards with [CoinPayPortal](https://coinpayportal.com), pay whole cents manually through checkout, or use the separate invoice commands from GitHub comments.
 
+For newly published invoices, `/coinpay status` reads the latest tracked invoice
+in its PR without moving funds. See [invoice status and rollout](docs/invoice-status.md)
+for the bounded lookup, privacy checks and older-invoice limitations.
+
 With repository enrollment and explicit opt-in, each merged PR earns **$0.001 USD**: ten PRs make one cent. The portal prevents duplicate accrual; the bot never pays automatically. See [merged PR rewards and setup](docs/pr-commands.md).
 
 A maintainer comments:

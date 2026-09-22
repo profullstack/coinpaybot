@@ -19,6 +19,12 @@ import { canCreateDirectly, canApprove, canCancel } from './permissions.js';
 import type { AuthorAssociation } from './permissions.js';
 import * as render from './render.js';
 import type { PendingRequest } from './render.js';
+import {
+  latestInvoiceReference,
+  positiveId,
+  statusCoolingDown,
+  statusMarker,
+} from './invoice-status.js';
 
 export interface CommentEvent {
   ref: IssueRef;
@@ -73,6 +79,8 @@ export async function handleComment(evt: CommentEvent, deps: HandlerDeps): Promi
   if (!deps.config.enabled) {
     return { action: 'noop_disabled' };
   }
+  // Status uses a bounded, numeric-identity-verified window, not the legacy full scan.
+  if (parsed.kind === 'status') return handleStatus(evt, deps);
 
   // Idempotency (FR-008): if we already replied to this comment id, stop.
   const existing = await deps.github.listComments(evt.ref);
@@ -100,8 +108,6 @@ export async function handleComment(evt: CommentEvent, deps: HandlerDeps): Promi
       return handlePublishInvoice(parsed, evt, deps);
     case 'approve':
       return handleApprove(evt, deps, existing);
-    case 'status':
-      return handleStatus(evt, deps, existing);
     case 'cancel':
       return handleCancel(evt, deps, existing);
   }
@@ -406,6 +412,12 @@ async function handlePublishInvoice(
         invoiceNumber: published.invoiceNumber,
         paymentLink: published.paymentLink,
         pdfLink: settings.pdfEnabled ? deps.coinpay.invoicePdfLink(published.invoiceId) ?? undefined : undefined,
+        reference: {
+          invoiceId: published.invoiceId,
+          repositoryId: evt.repositoryId!,
+          threadNumber: evt.ref.issueNumber,
+          commentId: evt.commentId,
+        },
         feeRate: published.feeRate,
         feeAmountUsd: published.feeAmountUsd,
         threadUrl,
@@ -485,12 +497,96 @@ async function handleApprove(evt: CommentEvent, deps: HandlerDeps, existing: Thr
   return createPaymentAndReply(req, evt, deps, existing);
 }
 
-async function handleStatus(evt: CommentEvent, deps: HandlerDeps, _existing: ThreadComment[]): Promise<HandlerResult> {
-  // Pull-only status (Action MVP can't receive webhooks — PRD §16 v0.2).
-  await deps.github.createComment(
-    evt.ref,
-    render.errorComment('Live status requires the hosted CoinPayPortal GitHub App. In Action mode, check the payment link directly.', evt.commentId),
-  );
+async function handleStatus(
+  evt: CommentEvent,
+  deps: HandlerDeps,
+): Promise<HandlerResult> {
+  if (!isHumanActor(evt))
+    return { action: 'skipped', detail: 'non_human_commenter' };
+  if (!deps.config.commands.status)
+    return { action: 'noop_disabled', detail: 'command_disabled' };
+  const unavailable = async (): Promise<HandlerResult> => {
+    await deps.github.createComment(
+      evt.ref,
+      render.errorComment(
+        'Invoice status is unavailable for this thread. Older invoices use their existing payment page. A maintainer can check the Action configuration and invoice in CoinPayPortal.',
+        evt.commentId,
+      ) +
+        (positiveId(evt.repositoryId)
+          ? `\n${statusMarker(evt.repositoryId, evt.ref.issueNumber)}`
+          : ''),
+    );
+    return { action: 'status', detail: 'unavailable' };
+  };
+  if (
+    !evt.isPullRequest ||
+    !positiveId(evt.repositoryId) ||
+    !positiveId(evt.commentId) ||
+    !positiveId(evt.ref.issueNumber) ||
+    !deps.github.listRecentComments ||
+    !deps.github.getSourceComment
+  ) {
+    // Unsupported/malformed events cannot be deduplicated safely: no reply.
+    return { action: 'skipped', detail: 'unsupported_status_context' };
+  }
+  let body: string;
+  try {
+    const existing = await deps.github.listRecentComments(evt.ref);
+    if (render.isHandled(existing, evt.commentId))
+      return { action: 'noop_duplicate' };
+    if (
+      statusCoolingDown(
+        existing,
+        evt.repositoryId,
+        evt.ref.issueNumber,
+        Date.now(),
+      )
+    ) {
+      return { action: 'skipped', detail: 'status_cooldown' };
+    }
+    const reference = latestInvoiceReference(
+      existing,
+      evt.repositoryId,
+      evt.ref.issueNumber,
+    );
+    // Do not await reply writes inside this try: an ambiguous write must not retry.
+    if (!reference) return unavailable();
+    const invoice = await deps.coinpay.getInvoiceStatus(
+      reference,
+      `${evt.ref.owner}/${evt.ref.repo}`,
+    );
+    const source = await deps.github.getSourceComment(
+      evt.ref,
+      reference.commentId,
+    );
+    const sourceTime = Date.parse(source.createdAt ?? '');
+    const invoiceTime = Date.parse(invoice.createdAt);
+    const issueUrl = `https://api.github.com/repos/${evt.ref.owner}/${evt.ref.repo}/issues/${evt.ref.issueNumber}`;
+    // Allow only clock skew, never trust copied markers as proof of creation.
+    if (
+      source.id !== reference.commentId ||
+      source.authorId !== invoice.actorId ||
+      source.authorType !== 'User' ||
+      source.issueUrl?.toLowerCase() !== issueUrl.toLowerCase() ||
+      !Number.isFinite(sourceTime) ||
+      sourceTime > invoiceTime + 60000 ||
+      invoiceTime > Date.now() + 60000
+    )
+      return unavailable();
+    body = render.invoiceStatusComment(
+      invoice,
+      deps.coinpay.invoiceLink(invoice.invoiceId),
+      deps.config.githubInvoices.pdfEnabled
+        ? deps.coinpay.invoicePdfLink(invoice.invoiceId)
+        : null,
+      new Date().toISOString(),
+      evt.commentId,
+    );
+  } catch {
+    return unavailable();
+  }
+  // Do not retry comment writes after an ambiguous GitHub failure.
+  await deps.github.createComment(evt.ref, body);
   return { action: 'status' };
 }
 

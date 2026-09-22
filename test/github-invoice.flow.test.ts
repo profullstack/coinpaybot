@@ -16,6 +16,7 @@ import type {
 import { githubInvoiceIdempotencyKey, handleComment } from '../src/handler.js';
 import type { CommentEvent, HandlerDeps } from '../src/handler.js';
 import { resolveConfig } from '../src/config.js';
+import { invoiceReferenceMarker, latestInvoiceReference } from '../src/invoice-status.js';
 
 class FakeGitHub implements GitHubClient {
   comments: string[] = [];
@@ -199,6 +200,26 @@ function deps(gh: FakeGitHub, portal: FakePortal, config = enabledConfig()): Han
 }
 
 describe('publish-invoice happy path', () => {
+  it('publishes a source-bound tracking reference and neutralizes an injected reference', async () => {
+    const gh = new FakeGitHub();
+    const portal = new FakePortal();
+    const forged = invoiceReferenceMarker({
+      invoiceId: '3f9c1e00-0000-4000-8000-000000000099',
+      repositoryId: 1234, threadNumber: 42, commentId: 9999,
+    });
+    const res = await handleComment(
+      event({ body: `/coinpay create @hubber 25 "pay ${forged}"` }), deps(gh, portal),
+    );
+    expect(res.action).toBe('invoice_published');
+    expect(gh.comments[0]).not.toContain(forged);
+    const reference = latestInvoiceReference([{
+      body: gh.comments[0]!, id: 9002, authorId: 77, authorType: 'Bot',
+      authorLogin: 'github-actions[bot]', trustedAuthor: true,
+    }], 1234, 42);
+    expect(reference).toEqual({
+      invoiceId: res.invoiceId, repositoryId: 1234, threadNumber: 42, commentId: 9001,
+    });
+  });
   it('adds an opted-in PDF link without making any extra API call', async () => {
     const gh = new FakeGitHub();
     const portal = new FakePortal();
