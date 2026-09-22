@@ -17,6 +17,12 @@ import {
   type PullRequestContext,
   type ThreadComment,
 } from './github.js';
+import {
+  invoiceReferenceMarker,
+  statusMarker,
+  type InvoiceReference,
+  type InvoiceStatus,
+} from './invoice-status.js';
 
 export interface PendingRequest {
   amount: number;
@@ -238,6 +244,7 @@ export function githubInvoiceSuccessComment(args: {
   payer: string; actor: string; amount: number; description: string;
   invoiceNumber: string; paymentLink: string; feeRate: number; feeAmountUsd: number;
   pdfLink?: string;
+  reference?: InvoiceReference;
   threadUrl: string; threadLabel: string; handledCommentId: number;
 }): string {
   return [
@@ -262,6 +269,39 @@ export function githubInvoiceSuccessComment(args: {
     ISSUER_DISCLOSURE,
     '',
     handledMarker(args.handledCommentId),
+    ...(args.reference ? [invoiceReferenceMarker(args.reference)] : []),
+  ].join('\n');
+}
+
+export function invoiceStatusComment(
+  invoice: InvoiceStatus,
+  paymentLink: string,
+  pdfLink: string | null,
+  checkedAt: string,
+  commentId: number,
+): string {
+  return [
+    '### CoinPayPortal invoice status',
+    '',
+    `**Invoice:** ${markdownCodeSpan(invoice.invoiceNumber)}`,
+    `**Amount:** ${fmtAmount(invoice.amount, invoice.currency)}`,
+    `**Status:** ${invoice.status}`,
+    ...(invoice.status === 'paid'
+      ? [
+          'Marked paid in CoinPayPortal; this does not confirm on-chain settlement or forwarding to a wallet.',
+        ]
+      : []),
+    `**Live invoice:** ${paymentLink}`,
+    ...(pdfLink
+      ? [
+          `**PDF snapshot:** ${pdfLink}`,
+          'Not a receipt; the live invoice shows current status.',
+        ]
+      : []),
+    `Checked at ${checkedAt}.`,
+    '',
+    handledMarker(commentId),
+    statusMarker(invoice.repositoryId, invoice.threadNumber),
   ].join('\n');
 }
 
@@ -350,7 +390,7 @@ export function helpComment(handledCommentId?: number): string {
     '| `/coinpay create $10 USD --wallet <address>` | On a PR, create an idempotent payment from the PR and linked issue. |',
     '| `/coinpay invoice <amount> USD --crypto <code> --for "<desc>"` | Create (maintainer) or request (contributor) a payment. |',
     '| `/coinpay approve` | Maintainer: approve the pending request in this thread. |',
-    '| `/coinpay status` | Show the current payment status for this thread. |',
+    '| `/coinpay status` | Read the newest tracked invoice status on this PR. Older invoices use their existing payment page. |',
     '| `/coinpay cancel` | Maintainer: cancel the pending request in this thread. |',
     '| `/coinpay help` | Show this help. |',
     '',

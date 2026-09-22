@@ -31215,6 +31215,57 @@ var core = __toESM(require_core(), 1);
 var github2 = __toESM(require_github(), 1);
 var import_yaml = __toESM(require_dist(), 1);
 
+// src/invoice-status.ts
+var INVOICE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function record(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function positiveId(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+function invoiceReferenceMarker(ref) {
+  return `<!-- coinpay:invoice:v1 ${Buffer.from(JSON.stringify(ref)).toString("base64url")} -->`;
+}
+function latestInvoiceReference(comments, repositoryId, threadNumber) {
+  let newest = null;
+  for (const comment of [...comments].sort(
+    (a, b) => (b.id ?? 0) - (a.id ?? 0)
+  )) {
+    if (!comment.trustedAuthor || !positiveId(comment.id) || !positiveId(comment.authorId))
+      continue;
+    const encoded = /<!-- coinpay:invoice:v1 ([A-Za-z0-9_-]{1,1024}) -->/.exec(
+      comment.body
+    )?.[1];
+    if (!encoded) continue;
+    try {
+      const value = record(
+        JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"))
+      );
+      if (typeof value.invoiceId === "string" && INVOICE_UUID.test(value.invoiceId) && value.repositoryId === repositoryId && value.threadNumber === threadNumber && positiveId(value.commentId)) {
+        if (!newest || value.commentId > newest.commentId) {
+          newest = {
+            invoiceId: value.invoiceId,
+            repositoryId,
+            threadNumber,
+            commentId: value.commentId
+          };
+        }
+      }
+    } catch {
+    }
+  }
+  return newest;
+}
+function statusMarker(repositoryId, threadNumber) {
+  return `<!-- coinpay:status:v1 ${repositoryId}:${threadNumber} -->`;
+}
+function statusCoolingDown(comments, repositoryId, threadNumber, now) {
+  return comments.some((c) => {
+    const created = Date.parse(c.createdAt ?? "");
+    return c.trustedAuthor && positiveId(c.authorId) && positiveId(c.id) && c.body.includes(statusMarker(repositoryId, threadNumber)) && Number.isFinite(created) && created <= now + 6e4 && now - created < 6e4;
+  });
+}
+
 // src/coinpay.ts
 var CoinPayError = class extends Error {
   code;
@@ -31262,7 +31313,7 @@ function classifyInvoice(status, body) {
   }
   return new CoinPayError("BAD_REQUEST", msg, status);
 }
-var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var UUID_RE = INVOICE_UUID;
 function invalidResponse(detail) {
   return new CoinPayError("INVALID_RESPONSE", `Malformed CoinPayPortal invoice response: ${detail}`, 200);
 }
@@ -31454,7 +31505,93 @@ var CoinPayClient = class {
       idempotentReplay: json.idempotentReplay === true
     };
   }
-  /** Fetch current payment state (drives pull-only `/coinpay status`). */
+  /** Minimal projection from the authenticated invoice read API. No private row escapes. */
+  async getInvoiceStatus(reference, repository) {
+    if (!INVOICE_UUID.test(reference.invoiceId) || !this.invoicePdfLink(reference.invoiceId)) {
+      throw invalidResponse("invalid invoice reference or origin");
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1e4);
+    let reader;
+    let abort = () => {
+    };
+    const aborted = new Promise((_, reject) => {
+      abort = () => {
+        void reader?.cancel().catch(() => {
+        });
+        reject(new CoinPayError("NETWORK", "Invoice status unavailable", 0));
+      };
+      controller.signal.addEventListener("abort", abort, { once: true });
+    });
+    const read = async () => {
+      const response = await this.fetchImpl(
+        `${this.baseUrl}/api/invoices/${reference.invoiceId}`,
+        {
+          method: "GET",
+          headers: { Authorization: `Bearer ${this.apiKey}` },
+          signal: controller.signal,
+          redirect: "error"
+        }
+      );
+      if (controller.signal.aborted) {
+        void response.body?.cancel().catch(() => {
+        });
+        throw new CoinPayError("NETWORK", "Invoice status unavailable", 0);
+      }
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => {
+        });
+        throw new CoinPayError(
+          "UNAVAILABLE",
+          "Invoice status unavailable",
+          response.status
+        );
+      }
+      if (!response.body) throw invalidResponse("missing body");
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let text = "", size = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > 65536) throw invalidResponse("response too large");
+          text += decoder.decode(value, { stream: true });
+        }
+      } finally {
+        void reader.cancel().catch(() => {
+        });
+      }
+      text += decoder.decode();
+      const json = record(JSON.parse(text));
+      const row = record(json.invoice);
+      const source = record(record(row.metadata).source_reference);
+      const amount = usdCents(row.amount);
+      if (json.success !== true || row.id !== reference.invoiceId || row.business_id !== this.businessId || row.currency !== "USD" || !Number.isSafeInteger(amount) || amount <= 0 || typeof row.invoice_number !== "string" || !row.invoice_number.trim() || row.invoice_number.length > 100 || !["sent", "overdue", "paid"].includes(String(row.status)) || source.provider !== "github" || typeof source.repository !== "string" || source.repository.toLowerCase() !== repository.toLowerCase() || source.thread_number !== reference.threadNumber || source.comment_id !== reference.commentId || !positiveId(source.actor_id) || typeof row.created_at !== "string" || !Number.isFinite(Date.parse(row.created_at))) {
+        throw invalidResponse("invoice source or public fields mismatch");
+      }
+      return {
+        ...reference,
+        invoiceNumber: row.invoice_number,
+        status: row.status,
+        amount: amount / 100,
+        currency: "USD",
+        actorId: source.actor_id,
+        createdAt: row.created_at
+      };
+    };
+    try {
+      return await Promise.race([read(), aborted]);
+    } catch {
+      throw new CoinPayError("UNAVAILABLE", "Invoice status unavailable", 0);
+    } finally {
+      clearTimeout(timeout);
+      controller.signal.removeEventListener("abort", abort);
+      controller.abort();
+    }
+  }
+  /** Legacy payment lookup; not used by invoice status. */
   async getPayment(paymentId) {
     const res = await this.call("GET", `/api/payments/${encodeURIComponent(paymentId)}`);
     const json = await res.json().catch(() => null);
@@ -31533,6 +31670,64 @@ var OctokitGitHubClient = class {
         trustedAuthor: this.trustedAuthorLogin.length > 0 && authorLogin.toLowerCase() === this.trustedAuthorLogin
       };
     });
+  }
+  async listRecentComments(ref) {
+    if (!this.trustedAuthorLogin) throw new Error("Missing bot identity");
+    const identity = await this.octokit.rest.users.getByUsername({
+      username: this.trustedAuthorLogin,
+      request: { signal: AbortSignal.timeout(1e4) }
+    });
+    if (!Number.isSafeInteger(identity.data.id) || identity.data.id <= 0 || identity.data.login.toLowerCase() !== this.trustedAuthorLogin) {
+      throw new Error("Invalid bot identity");
+    }
+    const page = (number) => this.octokit.rest.issues.listComments({
+      owner: ref.owner,
+      repo: ref.repo,
+      issue_number: ref.issueNumber,
+      per_page: 100,
+      page: number,
+      request: { signal: AbortSignal.timeout(1e4) }
+    });
+    const first = await page(1);
+    const lastLink = /<([^>]+)>;\s*rel="last"/.exec(
+      first.headers.link ?? ""
+    )?.[1];
+    const lastPage = lastLink ? Number(new URL(lastLink).searchParams.get("page")) : 1;
+    if (!Number.isSafeInteger(lastPage) || lastPage < 1)
+      throw new Error("Invalid comment pagination");
+    let comments = first.data;
+    if (lastPage > 1) {
+      const last = await page(lastPage);
+      const previous = last.data.length < 100 ? (lastPage === 2 ? first : await page(lastPage - 1)).data : [];
+      comments = [...previous, ...last.data];
+    }
+    return [...new Map(comments.map((c) => [c.id, c])).values()].sort((a, b) => a.id - b.id).slice(-100).map((c) => ({
+      body: c.body ?? "",
+      authorLogin: c.user?.login ?? "",
+      authorType: c.user?.type ?? "",
+      authorId: c.user?.id,
+      id: c.id,
+      createdAt: c.created_at,
+      issueUrl: c.issue_url,
+      trustedAuthor: c.user?.id === identity.data.id
+    }));
+  }
+  async getSourceComment(ref, commentId) {
+    const { data: c } = await this.octokit.rest.issues.getComment({
+      owner: ref.owner,
+      repo: ref.repo,
+      comment_id: commentId,
+      request: { signal: AbortSignal.timeout(1e4) }
+    });
+    return {
+      body: c.body ?? "",
+      id: c.id,
+      authorId: c.user?.id,
+      authorLogin: c.user?.login ?? "",
+      authorType: c.user?.type ?? "",
+      createdAt: c.created_at,
+      issueUrl: c.issue_url
+    };
   }
   async getPullRequestContext(ref) {
     let response;
@@ -32135,7 +32330,29 @@ function githubInvoiceSuccessComment(args) {
     `_Requested by @${cleanSummaryText(args.actor)}_`,
     ISSUER_DISCLOSURE,
     "",
-    handledMarker(args.handledCommentId)
+    handledMarker(args.handledCommentId),
+    ...args.reference ? [invoiceReferenceMarker(args.reference)] : []
+  ].join("\n");
+}
+function invoiceStatusComment(invoice, paymentLink, pdfLink, checkedAt, commentId) {
+  return [
+    "### CoinPayPortal invoice status",
+    "",
+    `**Invoice:** ${markdownCodeSpan(invoice.invoiceNumber)}`,
+    `**Amount:** ${fmtAmount(invoice.amount, invoice.currency)}`,
+    `**Status:** ${invoice.status}`,
+    ...invoice.status === "paid" ? [
+      "Marked paid in CoinPayPortal; this does not confirm on-chain settlement or forwarding to a wallet."
+    ] : [],
+    `**Live invoice:** ${paymentLink}`,
+    ...pdfLink ? [
+      `**PDF snapshot:** ${pdfLink}`,
+      "Not a receipt; the live invoice shows current status."
+    ] : [],
+    `Checked at ${checkedAt}.`,
+    "",
+    handledMarker(commentId),
+    statusMarker(invoice.repositoryId, invoice.threadNumber)
   ].join("\n");
 }
 function githubInvoiceDryRunComment(args) {
@@ -32196,7 +32413,7 @@ function helpComment(handledCommentId) {
     "| `/coinpay create $10 USD --wallet <address>` | On a PR, create an idempotent payment from the PR and linked issue. |",
     '| `/coinpay invoice <amount> USD --crypto <code> --for "<desc>"` | Create (maintainer) or request (contributor) a payment. |',
     "| `/coinpay approve` | Maintainer: approve the pending request in this thread. |",
-    "| `/coinpay status` | Show the current payment status for this thread. |",
+    "| `/coinpay status` | Read the newest tracked invoice status on this PR. Older invoices use their existing payment page. |",
     "| `/coinpay cancel` | Maintainer: cancel the pending request in this thread. |",
     "| `/coinpay help` | Show this help. |",
     "",
@@ -32233,6 +32450,7 @@ async function handleComment(evt, deps) {
   if (!deps.config.enabled) {
     return { action: "noop_disabled" };
   }
+  if (parsed.kind === "status") return handleStatus(evt, deps);
   const existing = await deps.github.listComments(evt.ref);
   if (isHandled(existing, evt.commentId)) {
     return { action: "noop_duplicate" };
@@ -32254,8 +32472,6 @@ async function handleComment(evt, deps) {
       return handlePublishInvoice(parsed, evt, deps);
     case "approve":
       return handleApprove(evt, deps, existing);
-    case "status":
-      return handleStatus(evt, deps, existing);
     case "cancel":
       return handleCancel(evt, deps, existing);
   }
@@ -32495,6 +32711,12 @@ ${threadUrl}#issuecomment-${evt.commentId}`,
         invoiceNumber: published.invoiceNumber,
         paymentLink: published.paymentLink,
         pdfLink: settings.pdfEnabled ? deps.coinpay.invoicePdfLink(published.invoiceId) ?? void 0 : void 0,
+        reference: {
+          invoiceId: published.invoiceId,
+          repositoryId: evt.repositoryId,
+          threadNumber: evt.ref.issueNumber,
+          commentId: evt.commentId
+        },
         feeRate: published.feeRate,
         feeAmountUsd: published.feeAmountUsd,
         threadUrl,
@@ -32567,11 +32789,68 @@ async function handleApprove(evt, deps, existing) {
   await deps.github.addLabels(evt.ref, [deps.config.labels.approved]);
   return createPaymentAndReply(req, evt, deps, existing);
 }
-async function handleStatus(evt, deps, _existing) {
-  await deps.github.createComment(
-    evt.ref,
-    errorComment("Live status requires the hosted CoinPayPortal GitHub App. In Action mode, check the payment link directly.", evt.commentId)
-  );
+async function handleStatus(evt, deps) {
+  if (!isHumanActor(evt))
+    return { action: "skipped", detail: "non_human_commenter" };
+  if (!deps.config.commands.status)
+    return { action: "noop_disabled", detail: "command_disabled" };
+  const unavailable = async () => {
+    await deps.github.createComment(
+      evt.ref,
+      errorComment(
+        "Invoice status is unavailable for this thread. Older invoices use their existing payment page. A maintainer can check the Action configuration and invoice in CoinPayPortal.",
+        evt.commentId
+      ) + (positiveId(evt.repositoryId) ? `
+${statusMarker(evt.repositoryId, evt.ref.issueNumber)}` : "")
+    );
+    return { action: "status", detail: "unavailable" };
+  };
+  if (!evt.isPullRequest || !positiveId(evt.repositoryId) || !positiveId(evt.commentId) || !positiveId(evt.ref.issueNumber) || !deps.github.listRecentComments || !deps.github.getSourceComment) {
+    return { action: "skipped", detail: "unsupported_status_context" };
+  }
+  let body;
+  try {
+    const existing = await deps.github.listRecentComments(evt.ref);
+    if (isHandled(existing, evt.commentId))
+      return { action: "noop_duplicate" };
+    if (statusCoolingDown(
+      existing,
+      evt.repositoryId,
+      evt.ref.issueNumber,
+      Date.now()
+    )) {
+      return { action: "skipped", detail: "status_cooldown" };
+    }
+    const reference = latestInvoiceReference(
+      existing,
+      evt.repositoryId,
+      evt.ref.issueNumber
+    );
+    if (!reference) return unavailable();
+    const invoice = await deps.coinpay.getInvoiceStatus(
+      reference,
+      `${evt.ref.owner}/${evt.ref.repo}`
+    );
+    const source = await deps.github.getSourceComment(
+      evt.ref,
+      reference.commentId
+    );
+    const sourceTime = Date.parse(source.createdAt ?? "");
+    const invoiceTime = Date.parse(invoice.createdAt);
+    const issueUrl = `https://api.github.com/repos/${evt.ref.owner}/${evt.ref.repo}/issues/${evt.ref.issueNumber}`;
+    if (source.id !== reference.commentId || source.authorId !== invoice.actorId || source.authorType !== "User" || source.issueUrl?.toLowerCase() !== issueUrl.toLowerCase() || !Number.isFinite(sourceTime) || sourceTime > invoiceTime + 6e4 || invoiceTime > Date.now() + 6e4)
+      return unavailable();
+    body = invoiceStatusComment(
+      invoice,
+      deps.coinpay.invoiceLink(invoice.invoiceId),
+      deps.config.githubInvoices.pdfEnabled ? deps.coinpay.invoicePdfLink(invoice.invoiceId) : null,
+      (/* @__PURE__ */ new Date()).toISOString(),
+      evt.commentId
+    );
+  } catch {
+    return unavailable();
+  }
+  await deps.github.createComment(evt.ref, body);
   return { action: "status" };
 }
 async function handleCancel(evt, deps, existing) {

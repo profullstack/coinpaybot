@@ -503,8 +503,23 @@ describe('PR-backed create command', () => {
     expect(gh.comments[0]).toContain('&lt;!-- coinpay:handled 8101 --&gt;');
 
     const second = await handleComment(
-      event({ commentId: 8101, body: '/coinpay status' }),
-      { coinpay, github: gh, config: resolveConfig() },
+      event({
+        commentId: 8101,
+        body: '/coinpay status',
+        actorType: 'User',
+        repositoryId: 123,
+        isPullRequest: true,
+      }),
+      {
+        coinpay,
+        github: Object.assign(gh, {
+          listRecentComments: () => gh.listComments(event({}).ref),
+          getSourceComment: async () => {
+            throw new Error('No tracked invoice expected');
+          },
+        }),
+        config: resolveConfig(),
+      },
     );
     expect(second.action).toBe('status');
   });

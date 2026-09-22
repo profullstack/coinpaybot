@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:workflow": "node --test scripts/check-pr-workflow.mjs",
-    "test:bundle": "node --test scripts/check-contribution-bundle.mjs",
+    "test:bundle": "node --test scripts/check-contribution-bundle.mjs scripts/check-status-bundle.mjs",
     "test:watch": "vitest",
     "check": "pnpm run typecheck && pnpm run test && pnpm run test:workflow && pnpm run build && pnpm run test:bundle"
   },
