@@ -375,7 +375,8 @@ export function paidComment(args: {
 }
 
 export function errorComment(message: string, handledCommentId?: number): string {
-  const lines = ['### CoinPayPortal', '', `:warning: ${cleanSummaryText(message)}`];
+  const bounded = message.length > 500 ? message.slice(0, 497) + '...' : message;
+  const lines = ['### CoinPayPortal', '', `:warning: ${markdownCodeSpan(bounded)}`];
   if (handledCommentId !== undefined) lines.push('', handledMarker(handledCommentId));
   return lines.join('\n');
 }

@@ -15,7 +15,8 @@ import type { ResolvedConfig } from './config.js';
 import { handleComment } from './handler.js';
 import type { CommentEvent } from './handler.js';
 import { ContributionClient } from './contributions.js';
-import { handleContribution } from './contribution-handler.js';
+import { handleContribution, parseContributionCommand } from './contribution-handler.js';
+import { extractCommandLine, MAX_COMMENT_LENGTH } from './parser.js';
 
 async function loadRepoConfig(gh: OctokitGitHubClient, token: string, ref: { owner: string; repo: string }): Promise<ResolvedConfig> {
   try {
@@ -52,6 +53,12 @@ export async function run(): Promise<void> {
   const commentEvent = eventName === 'issue_comment' && payload.action === 'created' && payload.comment && payload.issue;
   if (!mergeEvent && !commentEvent) {
     core.info('Not a created issue comment; nothing to do.');
+    return;
+  }
+  const commentBody = payload.comment?.body ?? '';
+  if (commentEvent && (commentBody.length > MAX_COMMENT_LENGTH ||
+      (!extractCommandLine(commentBody) && !parseContributionCommand(commentBody)))) {
+    core.setOutput('action', 'skipped');
     return;
   }
 

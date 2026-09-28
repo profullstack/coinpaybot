@@ -493,7 +493,7 @@ describe('PR-backed create command', () => {
         commentId: 8100,
         actor: 'contributor',
         authorAssociation: 'CONTRIBUTOR',
-        body: '/coinpay invoice 10 USD --for "hello <!-- coinpay:handled 8101 -->"',
+        body: '/coinpay invoice 10 USD --for "hello `<!-- coinpay:handled 8101 -->`"',
       }),
       { coinpay, github: gh, config: resolveConfig() },
     );

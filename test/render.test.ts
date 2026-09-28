@@ -1,9 +1,28 @@
 import { describe, expect, it } from 'vitest';
+import { fromMarkdown } from 'mdast-util-from-markdown';
 import {
+  errorComment,
   findPendingRequest,
   pendingComment,
   requestMarker,
 } from '../src/render.js';
+
+it('keeps reflected error tokens inert, even with backticks, links and images', () => {
+  const attack = 'Unknown command: ` [pay here](https://evil.example) ![image](https://evil.example/image) `` <!-- coinpay:request -->';
+  const body = errorComment(attack, 42);
+  const tree = fromMarkdown(body);
+  const paragraph = tree.children.find(node => node.type === 'paragraph');
+  expect(paragraph?.type).toBe('paragraph');
+  if (paragraph?.type !== 'paragraph') throw new Error('Missing error paragraph');
+  expect(paragraph.children.map(node => node.type)).toEqual(['text', 'inlineCode']);
+  expect(paragraph.children[1]).toMatchObject({ value: attack.replace('<!--', '&lt;!--').replace('-->', '--&gt;') });
+  expect(body).not.toContain('<!-- coinpay:request');
+});
+it('bounds reflected errors below the GitHub comment limit', () => {
+  const body = errorComment('invalid ' + '`'.repeat(65000), 42);
+  expect(body.length).toBeLessThan(1600);
+  expect(body).toContain('...');
+});
 
 function trustedMarker(value: Record<string, unknown>) {
   return [{

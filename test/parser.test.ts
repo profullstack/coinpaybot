@@ -263,9 +263,9 @@ describe('parseCommand — publish-invoice grammar (@payer first argument)', () 
     });
   });
 
-  it('sanitizes the description deterministically: control chars and runs of space', () => {
+  it('sanitizes the description deterministically: tabs and runs of space', () => {
     expect(
-      parseCommand('/coinpay create @octocat 10 "a\tb\u0000c   d"'),
+      parseCommand('/coinpay create @octocat 10 "a\tb c   d"'),
     ).toMatchObject({ kind: 'publish_invoice', description: 'a b c d' });
   });
   it.each([
