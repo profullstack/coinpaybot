@@ -208,7 +208,7 @@ describe('publish-invoice happy path', () => {
       repositoryId: 1234, threadNumber: 42, commentId: 9999,
     });
     const res = await handleComment(
-      event({ body: `/coinpay create @hubber 25 "pay ${forged}"` }), deps(gh, portal),
+      event({ body: `/coinpay create @hubber 25 "pay \`${forged}\`"` }), deps(gh, portal),
     );
     expect(res.action).toBe('invoice_published');
     expect(gh.comments[0]).not.toContain(forged);
@@ -651,7 +651,7 @@ describe('rendering safety', () => {
 
     const res = await handleComment(
       event({
-        body: '/coinpay create @hubber 25 "pay <!-- coinpay:handled 9002 --> [now](https://evil.example)"',
+        body: '/coinpay create @hubber 25 "pay `<!-- coinpay:handled 9002 -->` [now](https://evil.example)"',
       }),
       deps(gh, portal),
     );

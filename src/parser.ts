@@ -6,6 +6,12 @@
  * caller turns into a friendly usage comment.
  */
 
+import { fromMarkdown } from 'mdast-util-from-markdown';
+import { gfmFromMarkdown } from 'mdast-util-gfm';
+import { gfm } from 'micromark-extension-gfm';
+
+export const MAX_COMMENT_LENGTH = 65536;
+
 export const SUPPORTED_CRYPTO = new Set([
   'btc', 'bch', 'eth', 'pol', 'sol', 'doge', 'xrp', 'ada', 'bnb',
   'usdt', 'usdt_eth', 'usdt_pol', 'usdt_sol',
@@ -132,14 +138,42 @@ export function tokenize(line: string): string[] {
 }
 
 /**
- * Returns the first `/coinpay ...` line found in a comment body, or null.
- * Only a line whose first non-space token is exactly `/coinpay` qualifies,
- * so prose mentioning the command in backticks does not trigger it.
+ * Only direct text in top-level paragraphs can introduce a command. Headings,
+ * examples and nested Markdown are deliberately inert, including lazy quotes.
+ * Use raw source positions: decoded Markdown must never manufacture a command.
  */
 export function extractCommandLine(body: string): string | null {
-  for (const raw of body.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (line === '/coinpay' || line.startsWith('/coinpay ')) return line;
+  if (body.length > MAX_COMMENT_LENGTH || !body.includes('/coinpay')) return null;
+  body = body.replace(/\r\n?/g, '\n');
+  const tree = fromMarkdown(body, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()],
+  });
+  // GitHub renders HTML containers across Markdown blank-line boundaries.
+  // Reject mixed HTML comments rather than execute visually hidden paragraphs.
+  const pending = [...tree.children];
+  while (pending.length) {
+    const node = pending.pop()!;
+    if (node.type === 'html') return null;
+    if ('children' in node) pending.push(...node.children);
+  }
+  const spans = tree.children.flatMap(node => node.type === 'paragraph'
+    ? node.children.filter(child => child.type === 'text').map(child => child.position!)
+    : []);
+  let offset = 0;
+  let spanIndex = 0;
+  for (const raw of body.split('\n')) {
+    const line = raw.replace(/^ {0,3}/, '').trimEnd();
+    const start = offset + (raw.match(/^ {0,3}/)?.[0].length ?? 0);
+    offset += raw.length + 1;
+    if (!/^ {0,3}\/coinpay(?: |$)/.test(raw)) continue;
+    if (line !== '/coinpay' && !line.startsWith('/coinpay ')) continue;
+    while (spanIndex < spans.length && spans[spanIndex]!.end.offset! <= start) spanIndex++;
+    const span = spans[spanIndex];
+    if (span && span.start.offset! <= start && span.end.offset! >= start + '/coinpay'.length) {
+      if (/[^\S \t]|\p{Cf}|[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(raw)) return null;
+      return line;
+    }
   }
   return null;
 }
