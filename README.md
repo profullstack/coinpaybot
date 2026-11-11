@@ -27,7 +27,7 @@ each repository. The direct Action setup below also supports general issue
 commands and contributor request flows.
 
 1. In CoinPayPortal, create an API key (`cp_live_...`) and note your **business id**. Make sure the business has a **receiving wallet configured for the crypto you invoice in** (e.g. `usdc_pol`) — without one, payment creation fails (see [Limitations](#limitations)).
-2. Add repository secrets `COINPAY_API_KEY` and `COINPAY_BUSINESS_ID`.
+2. Add repository (or organization) secrets `COINPAY_API_KEY` and `COINPAY_BUSINESS_ID`. Until they exist the bot still answers: `/coinpay connect`, `help`, and any other command reply with setup steps instead of failing the run.
 3. Copy [`examples/coinpay-invoice.yml`](examples/coinpay-invoice.yml) to `.github/workflows/coinpay.yml`.
 
 ## Commands
@@ -38,7 +38,8 @@ commands and contributor request flows.
 | `/coinpay settle --wallet <address> --blockchain USDC_POL` | Current repository maintainer on a PR | Reserve available whole cents for a manually paid contributor checkout. The wallet and chain must be independently verified. |
 | `/coinpay create @payer <amount> "<desc>"` | Anyone (opt-in, disabled by default) | Create **and publish** a CoinPayPortal invoice from the repository's configured business and reply with a live payment link. Add `--dry-run` to preview without creating anything. See [GitHub-published invoices](#github-published-invoices-coinpay-create-payer). |
 | `/coinpay create $10 USD --wallet <address>` | Maintainer on a PR | Create an idempotent payment from the PR and up to five linked closing issues. Add `--dry-run` to preview without creating anything. |
-| `/coinpay invoice <amount> USD --crypto <code> --for "<desc>"` | Maintainer (direct) / contributor (request) | Create or request a payment. |
+| `/coinpay invoice $100 usd in SOL for "<desc>"` | Maintainer (direct) / contributor (request) | Create or request a payment. Plain words (`in SOL`, `in USDC on solana`, `100 dollars`) or flags (`--crypto usdc_pol --for "<desc>"`). `pay`, `charge`, `bill` are aliases. |
+| `/coinpay connect` | Anyone | Is this repo connected to CoinPayPortal? If not, the exact steps to connect it. |
 | `/coinpay approve` | Maintainer | Approve the pending request in this thread. |
 | `/coinpay cancel` | Maintainer | Cancel the pending request in this thread. |
 | `/coinpay status` | Anyone | Payment status (pull-only in Action mode). |

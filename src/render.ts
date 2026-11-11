@@ -381,6 +381,47 @@ export function errorComment(message: string, handledCommentId?: number): string
   return lines.join('\n');
 }
 
+export function connectComment(args: {
+  connected: boolean;
+  baseUrl: string;
+  repo: string;
+  defaultCrypto: string;
+  /** Set when the user ran another command before connecting. */
+  requested?: string;
+}, handledCommentId?: number): string {
+  const lines = ['### CoinPayPortal', ''];
+  if (args.connected) {
+    lines.push(
+      `:white_check_mark: \`${args.repo}\` is connected to CoinPayPortal. Default crypto: \`${args.defaultCrypto}\`.`,
+      '',
+      'Try `/coinpay invoice $100 usd in SOL` or `/coinpay help`.',
+      '',
+      `Invoices need a receiving wallet for that crypto on the business: ${args.baseUrl}/businesses`,
+    );
+  } else {
+    if (args.requested) {
+      lines.push(`:warning: \`/coinpay ${args.requested}\` needs this repository connected to CoinPayPortal first.`, '');
+    } else {
+      lines.push(`:link: \`${args.repo}\` is not connected to CoinPayPortal yet.`, '');
+    }
+    lines.push(
+      'A maintainer can connect it in two steps:',
+      '',
+      `1. In CoinPayPortal create (or pick) a business with a receiving wallet, then an API key: ${args.baseUrl}/businesses`,
+      '2. Add repository (or organization) secrets `COINPAY_API_KEY` and `COINPAY_BUSINESS_ID`:',
+      '',
+      '```sh',
+      `gh secret set COINPAY_API_KEY -R ${args.repo}`,
+      `gh secret set COINPAY_BUSINESS_ID -R ${args.repo}`,
+      '```',
+      '',
+      'Then run `/coinpay connect` again to confirm.',
+    );
+  }
+  if (handledCommentId !== undefined) lines.push('', handledMarker(handledCommentId));
+  return lines.join('\n');
+}
+
 export function helpComment(handledCommentId?: number): string {
   const lines = [
     '### CoinPayPortal commands',
@@ -389,7 +430,8 @@ export function helpComment(handledCommentId?: number): string {
     '| --- | --- |',
     '| `/coinpay create @payer <amount> "<desc>"` | Publish an invoice from this repository’s configured CoinPayPortal business (when enabled). Anyone may run it; `@payer` is a mention, not a linked account. Add `--dry-run` to preview. |',
     '| `/coinpay create $10 USD --wallet <address>` | On a PR, create an idempotent payment from the PR and linked issue. |',
-    '| `/coinpay invoice <amount> USD --crypto <code> --for "<desc>"` | Create (maintainer) or request (contributor) a payment. |',
+    '| `/coinpay invoice $100 usd in SOL for "<desc>"` | Create (maintainer) or request (contributor) a payment. Plain words or flags: `--crypto usdc_pol --for "<desc>"`. |',
+    '| `/coinpay connect` | Check whether this repository is connected to CoinPayPortal, and how to connect it. |',
     '| `/coinpay approve` | Maintainer: approve the pending request in this thread. |',
     '| `/coinpay status` | Read the newest tracked invoice status on this PR. Older invoices use their existing payment page. |',
     '| `/coinpay cancel` | Maintainer: cancel the pending request in this thread. |',
@@ -398,6 +440,8 @@ export function helpComment(handledCommentId?: number): string {
     'Examples:',
     '- `/coinpay create @octocat 25 "Fix the settlement race"`',
     '- `/coinpay create $10 USD --wallet <address> --dry-run`',
+    '- `/coinpay invoice $100usd in SOL`',
+    '- `/coinpay invoice 250 dollars in USDC on solana for "Milestone 1"`',
     '- `/coinpay invoice 250 USD --crypto usdc_pol --for "Milestone 1"`',
   ];
   if (handledCommentId !== undefined) lines.push('', handledMarker(handledCommentId));

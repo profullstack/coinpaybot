@@ -20,6 +20,118 @@ export const SUPPORTED_CRYPTO = new Set([
 
 const USD_AMOUNT_RE = /^\d{1,9}(?:\.\d{1,2})?$/;
 
+/** Plain-language asset names -> CoinPayPortal code (native coin). */
+const ASSET_ALIASES: Record<string, string> = {
+  btc: 'btc', bitcoin: 'btc', bch: 'bch', bitcoincash: 'bch',
+  eth: 'eth', ether: 'eth', ethereum: 'eth',
+  sol: 'sol', solana: 'sol',
+  pol: 'pol', polygon: 'pol', matic: 'pol',
+  doge: 'doge', dogecoin: 'doge', xrp: 'xrp', ripple: 'xrp',
+  ada: 'ada', cardano: 'ada', bnb: 'bnb',
+  usdc: 'usdc', usdt: 'usdt', tether: 'usdt',
+};
+
+/** Chain names accepted after `on` for stablecoins. */
+const CHAIN_ALIASES: Record<string, string> = {
+  sol: 'sol', solana: 'sol',
+  pol: 'pol', polygon: 'pol', matic: 'pol',
+  eth: 'eth', ethereum: 'eth', mainnet: 'eth',
+  base: 'base',
+};
+
+/**
+ * Resolve a human crypto spelling to a CoinPayPortal code. Accepts exact codes
+ * (`usdc_sol`), hyphen/slash spellings (`USDC-SOL`), names (`solana`) and an
+ * optional chain (`usdc` + `solana`). Returns null when it is not recognised.
+ */
+export function resolveCrypto(asset: string, chain?: string): string | null {
+  const a = asset.toLowerCase().replace(/[-/.]/g, '_');
+  if (!chain && SUPPORTED_CRYPTO.has(a)) return a;
+  const [head, tail] = a.split('_', 2) as [string, string | undefined];
+  const base = ASSET_ALIASES[head];
+  if (!base) return null;
+  const chainKey = (chain ?? tail)?.toLowerCase();
+  if (!chainKey) return base;
+  const c = CHAIN_ALIASES[chainKey];
+  if (!c) return null;
+  if (base === 'usdc' || base === 'usdt') {
+    const code = `${base}_${c}`;
+    return SUPPORTED_CRYPTO.has(code) ? code : null;
+  }
+  // A native coin "on" its own chain (`sol on solana`) is just the coin.
+  return base === c || (base === 'eth' && c === 'eth') ? base : null;
+}
+
+const NATURAL_AMOUNT_RE = /^\$?(\d{1,9}(?:\.\d{1,2})?)(usd|dollars?|bucks)?$/i;
+const FIAT_WORDS = new Set(['usd', 'dollar', 'dollars', 'bucks', 'us$']);
+const CRYPTO_LEAD = new Set(['in', 'as', 'via', 'with', 'using']);
+
+/**
+ * Rewrite plain-language invoice wording into the flag grammar, leaving flag
+ * syntax untouched so both forms work and can be mixed:
+ *
+ *   `$100usd in SOL`                       -> `100 USD --crypto sol`
+ *   `100 dollars in usdc on solana for "Logo"` -> `100 USD --crypto usdc_sol --for Logo`
+ *   `$25 --crypto usdc_pol`                -> unchanged
+ */
+export function normalizeNaturalInvoice(args: string[]): string[] | ParseError {
+  const out: string[] = [];
+  const fail = (message: string): ParseError => ({ kind: 'error', code: 'bad_crypto', message });
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i]!;
+    const lower = t.toLowerCase();
+    if (t.startsWith('--')) {
+      // Pass flags (and their value) through; normalise a human `--crypto`.
+      out.push(t);
+      const v = args[i + 1];
+      if (v !== undefined && !v.startsWith('--') && t !== '--dry-run') {
+        out.push(t === '--crypto' ? (resolveCrypto(v) ?? v) : v);
+        i++;
+      }
+      continue;
+    }
+    if (out.length === 0) {
+      const m = NATURAL_AMOUNT_RE.exec(t);
+      if (m) {
+        out.push(m[1]!);
+        if (m[2]) out.push('USD');
+        continue;
+      }
+    }
+    if (FIAT_WORDS.has(lower)) {
+      if (!out.includes('USD')) out.push('USD');
+      continue;
+    }
+    if (CRYPTO_LEAD.has(lower) && args[i + 1] !== undefined) {
+      const asset = args[++i]!;
+      let chain: string | undefined;
+      if (args[i + 1]?.toLowerCase() === 'on' && args[i + 2] !== undefined) {
+        chain = args[i + 2];
+        i += 2;
+      }
+      const code = resolveCrypto(asset, chain);
+      if (!code) {
+        return fail(`Unsupported crypto \`${chain ? `${asset} on ${chain}` : asset}\`. Try e.g. \`in SOL\`, \`in BTC\`, \`in USDC on solana\`. Supported codes: ${[...SUPPORTED_CRYPTO].join(', ')}.`);
+      }
+      out.push('--crypto', code);
+      continue;
+    }
+    if (lower === 'for' && args[i + 1] !== undefined && !args[i + 1]!.startsWith('--')) {
+      const desc: string[] = [];
+      while (args[i + 1] !== undefined && !args[i + 1]!.startsWith('--')) {
+        // `for logo in SOL`: a trailing recognised crypto clause ends the text.
+        const nxt = args[i + 1]!.toLowerCase();
+        if (desc.length > 0 && CRYPTO_LEAD.has(nxt) && args[i + 2] !== undefined && resolveCrypto(args[i + 2]!)) break;
+        desc.push(args[++i]!);
+      }
+      out.push('--for', desc.join(' '));
+      continue;
+    }
+    out.push(t);
+  }
+  return out;
+}
+
 /**
  * Valid GitHub login: 1-39 alphanumeric/hyphen characters that start and end
  * alphanumeric. Matches the validation CoinPayPortal applies to
@@ -48,7 +160,7 @@ export function isCanonicalUsdAmount(value: unknown): value is number {
   );
 }
 
-export type Subcommand = 'help' | 'create' | 'invoice' | 'approve' | 'status' | 'cancel';
+export type Subcommand = 'help' | 'create' | 'invoice' | 'approve' | 'status' | 'cancel' | 'connect' | 'setup' | 'pay' | 'charge' | 'bill';
 
 export interface InvoiceCommand {
   kind: 'invoice';
@@ -83,7 +195,7 @@ export interface PublishInvoiceCommand {
 }
 
 export interface SimpleCommand {
-  kind: 'help' | 'approve' | 'status' | 'cancel';
+  kind: 'help' | 'approve' | 'status' | 'cancel' | 'connect';
 }
 
 export type ParsedCommand = InvoiceCommand | PublishInvoiceCommand | SimpleCommand;
@@ -225,6 +337,9 @@ export function parseCommand(body: string): ParseResult {
       return { kind: 'status' };
     case 'cancel':
       return { kind: 'cancel' };
+    case 'connect':
+    case 'setup':
+      return { kind: 'connect' };
     case 'create':
       // The first argument selects the flow: `@payer` publishes a CoinPay
       // invoice; anything else keeps the legacy numeric-first payment grammar.
@@ -233,7 +348,13 @@ export function parseCommand(body: string): ParseResult {
       }
       return parseInvoice(tokens.slice(2), 'create');
     case 'invoice':
-      return parseInvoice(tokens.slice(2), 'invoice');
+    case 'pay':
+    case 'charge':
+    case 'bill': {
+      const natural = normalizeNaturalInvoice(tokens.slice(2));
+      if (!Array.isArray(natural)) return natural;
+      return parseInvoice(natural, 'invoice');
+    }
     default:
       return {
         kind: 'error',

@@ -47,11 +47,19 @@ export interface HandlerDeps {
   coinpay: CoinPayClient;
   github: GitHubClient;
   config: ResolvedConfig;
+  /** False when the repo has no CoinPay API key / business id secrets yet. */
+  connected?: boolean;
+  /** CoinPayPortal base URL, for setup links. */
+  baseUrl?: string;
+  /** owner/repo, for setup links. */
+  repoFullName?: string;
 }
 
 export type Action =
   | 'skipped'
   | 'help'
+  | 'connect'
+  | 'not_connected'
   | 'invoice_created'
   | 'invoice_published'
   | 'invoice_already_closed'
@@ -78,6 +86,19 @@ export async function handleComment(evt: CommentEvent, deps: HandlerDeps): Promi
   }
   if (!deps.config.enabled) {
     return { action: 'noop_disabled' };
+  }
+  const connected = deps.connected !== false;
+  if (parsed.kind === 'connect' || (!connected && parsed.kind !== 'help' && parsed.kind !== 'error')) {
+    const existingForConnect = await deps.github.listComments(evt.ref);
+    if (render.isHandled(existingForConnect, evt.commentId)) return { action: 'noop_duplicate' };
+    await deps.github.createComment(evt.ref, render.connectComment({
+      connected,
+      baseUrl: deps.baseUrl ?? 'https://coinpayportal.com',
+      repo: deps.repoFullName ?? `${evt.ref.owner}/${evt.ref.repo}`,
+      defaultCrypto: deps.config.defaultCrypto,
+      requested: parsed.kind === 'connect' ? undefined : parsed.kind,
+    }, evt.commentId));
+    return { action: parsed.kind === 'connect' ? 'connect' : 'not_connected' };
   }
   // Status uses a bounded, numeric-identity-verified window, not the legacy full scan.
   if (parsed.kind === 'status') return handleStatus(evt, deps);
