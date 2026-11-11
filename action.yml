@@ -11,10 +11,10 @@ inputs:
     default: ${{ github.token }}
   coinpay-api-key:
     description: 'CoinPayPortal API key (cp_live_...). Contributions require a dedicated repository-bound scoped key; legacy invoice commands need separate merchant permissions.'
-    required: true
+    required: false
   coinpay-business-id:
     description: 'CoinPayPortal business id that owns the receiving wallet.'
-    required: true
+    required: false
   coinpay-base-url:
     description: 'CoinPayPortal base URL.'
     required: false

@@ -40837,6 +40837,115 @@ var SUPPORTED_CRYPTO = /* @__PURE__ */ new Set([
   "usdc_base"
 ]);
 var USD_AMOUNT_RE = /^\d{1,9}(?:\.\d{1,2})?$/;
+var ASSET_ALIASES = {
+  btc: "btc",
+  bitcoin: "btc",
+  bch: "bch",
+  bitcoincash: "bch",
+  eth: "eth",
+  ether: "eth",
+  ethereum: "eth",
+  sol: "sol",
+  solana: "sol",
+  pol: "pol",
+  polygon: "pol",
+  matic: "pol",
+  doge: "doge",
+  dogecoin: "doge",
+  xrp: "xrp",
+  ripple: "xrp",
+  ada: "ada",
+  cardano: "ada",
+  bnb: "bnb",
+  usdc: "usdc",
+  usdt: "usdt",
+  tether: "usdt"
+};
+var CHAIN_ALIASES = {
+  sol: "sol",
+  solana: "sol",
+  pol: "pol",
+  polygon: "pol",
+  matic: "pol",
+  eth: "eth",
+  ethereum: "eth",
+  mainnet: "eth",
+  base: "base"
+};
+function resolveCrypto(asset, chain) {
+  const a = asset.toLowerCase().replace(/[-/.]/g, "_");
+  if (!chain && SUPPORTED_CRYPTO.has(a)) return a;
+  const [head, tail] = a.split("_", 2);
+  const base = ASSET_ALIASES[head];
+  if (!base) return null;
+  const chainKey = (chain ?? tail)?.toLowerCase();
+  if (!chainKey) return base;
+  const c = CHAIN_ALIASES[chainKey];
+  if (!c) return null;
+  if (base === "usdc" || base === "usdt") {
+    const code2 = `${base}_${c}`;
+    return SUPPORTED_CRYPTO.has(code2) ? code2 : null;
+  }
+  return base === c || base === "eth" && c === "eth" ? base : null;
+}
+var NATURAL_AMOUNT_RE = /^\$?(\d{1,9}(?:\.\d{1,2})?)(usd|dollars?|bucks)?$/i;
+var FIAT_WORDS = /* @__PURE__ */ new Set(["usd", "dollar", "dollars", "bucks", "us$"]);
+var CRYPTO_LEAD = /* @__PURE__ */ new Set(["in", "as", "via", "with", "using"]);
+function normalizeNaturalInvoice(args) {
+  const out = [];
+  const fail = (message) => ({ kind: "error", code: "bad_crypto", message });
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i];
+    const lower = t.toLowerCase();
+    if (t.startsWith("--")) {
+      out.push(t);
+      const v = args[i + 1];
+      if (v !== void 0 && !v.startsWith("--") && t !== "--dry-run") {
+        out.push(t === "--crypto" ? resolveCrypto(v) ?? v : v);
+        i++;
+      }
+      continue;
+    }
+    if (out.length === 0) {
+      const m = NATURAL_AMOUNT_RE.exec(t);
+      if (m) {
+        out.push(m[1]);
+        if (m[2]) out.push("USD");
+        continue;
+      }
+    }
+    if (FIAT_WORDS.has(lower)) {
+      if (!out.includes("USD")) out.push("USD");
+      continue;
+    }
+    if (CRYPTO_LEAD.has(lower) && args[i + 1] !== void 0) {
+      const asset = args[++i];
+      let chain;
+      if (args[i + 1]?.toLowerCase() === "on" && args[i + 2] !== void 0) {
+        chain = args[i + 2];
+        i += 2;
+      }
+      const code2 = resolveCrypto(asset, chain);
+      if (!code2) {
+        return fail(`Unsupported crypto \`${chain ? `${asset} on ${chain}` : asset}\`. Try e.g. \`in SOL\`, \`in BTC\`, \`in USDC on solana\`. Supported codes: ${[...SUPPORTED_CRYPTO].join(", ")}.`);
+      }
+      out.push("--crypto", code2);
+      continue;
+    }
+    if (lower === "for" && args[i + 1] !== void 0 && !args[i + 1].startsWith("--")) {
+      const desc = [];
+      while (args[i + 1] !== void 0 && !args[i + 1].startsWith("--")) {
+        const nxt = args[i + 1].toLowerCase();
+        if (desc.length > 0 && CRYPTO_LEAD.has(nxt) && args[i + 2] !== void 0 && resolveCrypto(args[i + 2])) break;
+        desc.push(args[++i]);
+      }
+      out.push("--for", desc.join(" "));
+      continue;
+    }
+    out.push(t);
+  }
+  return out;
+}
 var GITHUB_LOGIN_RE = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
 function isValidGithubLogin(value) {
   return GITHUB_LOGIN_RE.test(value);
@@ -40925,13 +41034,22 @@ function parseCommand(body) {
       return { kind: "status" };
     case "cancel":
       return { kind: "cancel" };
+    case "connect":
+    case "setup":
+      return { kind: "connect" };
     case "create":
       if (detailed[2]?.text.startsWith("@")) {
         return parsePublishInvoice(detailed.slice(2));
       }
       return parseInvoice(tokens.slice(2), "create");
     case "invoice":
-      return parseInvoice(tokens.slice(2), "invoice");
+    case "pay":
+    case "charge":
+    case "bill": {
+      const natural = normalizeNaturalInvoice(tokens.slice(2));
+      if (!Array.isArray(natural)) return natural;
+      return parseInvoice(natural, "invoice");
+    }
     default:
       return {
         kind: "error",
@@ -41449,6 +41567,39 @@ function errorComment(message, handledCommentId) {
   if (handledCommentId !== void 0) lines.push("", handledMarker(handledCommentId));
   return lines.join("\n");
 }
+function connectComment(args, handledCommentId) {
+  const lines = ["### CoinPayPortal", ""];
+  if (args.connected) {
+    lines.push(
+      `:white_check_mark: \`${args.repo}\` is connected to CoinPayPortal. Default crypto: \`${args.defaultCrypto}\`.`,
+      "",
+      "Try `/coinpay invoice $100 usd in SOL` or `/coinpay help`.",
+      "",
+      `Invoices need a receiving wallet for that crypto on the business: ${args.baseUrl}/businesses`
+    );
+  } else {
+    if (args.requested) {
+      lines.push(`:warning: \`/coinpay ${args.requested}\` needs this repository connected to CoinPayPortal first.`, "");
+    } else {
+      lines.push(`:link: \`${args.repo}\` is not connected to CoinPayPortal yet.`, "");
+    }
+    lines.push(
+      "A maintainer can connect it in two steps:",
+      "",
+      `1. In CoinPayPortal create (or pick) a business with a receiving wallet, then an API key: ${args.baseUrl}/businesses`,
+      "2. Add repository (or organization) secrets `COINPAY_API_KEY` and `COINPAY_BUSINESS_ID`:",
+      "",
+      "```sh",
+      `gh secret set COINPAY_API_KEY -R ${args.repo}`,
+      `gh secret set COINPAY_BUSINESS_ID -R ${args.repo}`,
+      "```",
+      "",
+      "Then run `/coinpay connect` again to confirm."
+    );
+  }
+  if (handledCommentId !== void 0) lines.push("", handledMarker(handledCommentId));
+  return lines.join("\n");
+}
 function helpComment(handledCommentId) {
   const lines = [
     "### CoinPayPortal commands",
@@ -41457,7 +41608,8 @@ function helpComment(handledCommentId) {
     "| --- | --- |",
     '| `/coinpay create @payer <amount> "<desc>"` | Publish an invoice from this repository\u2019s configured CoinPayPortal business (when enabled). Anyone may run it; `@payer` is a mention, not a linked account. Add `--dry-run` to preview. |',
     "| `/coinpay create $10 USD --wallet <address>` | On a PR, create an idempotent payment from the PR and linked issue. |",
-    '| `/coinpay invoice <amount> USD --crypto <code> --for "<desc>"` | Create (maintainer) or request (contributor) a payment. |',
+    '| `/coinpay invoice $100 usd in SOL for "<desc>"` | Create (maintainer) or request (contributor) a payment. Plain words or flags: `--crypto usdc_pol --for "<desc>"`. |',
+    "| `/coinpay connect` | Check whether this repository is connected to CoinPayPortal, and how to connect it. |",
     "| `/coinpay approve` | Maintainer: approve the pending request in this thread. |",
     "| `/coinpay status` | Read the newest tracked invoice status on this PR. Older invoices use their existing payment page. |",
     "| `/coinpay cancel` | Maintainer: cancel the pending request in this thread. |",
@@ -41466,6 +41618,8 @@ function helpComment(handledCommentId) {
     "Examples:",
     '- `/coinpay create @octocat 25 "Fix the settlement race"`',
     "- `/coinpay create $10 USD --wallet <address> --dry-run`",
+    "- `/coinpay invoice $100usd in SOL`",
+    '- `/coinpay invoice 250 dollars in USDC on solana for "Milestone 1"`',
     '- `/coinpay invoice 250 USD --crypto usdc_pol --for "Milestone 1"`'
   ];
   if (handledCommentId !== void 0) lines.push("", handledMarker(handledCommentId));
@@ -41495,6 +41649,19 @@ async function handleComment(evt, deps) {
   }
   if (!deps.config.enabled) {
     return { action: "noop_disabled" };
+  }
+  const connected = deps.connected !== false;
+  if (parsed.kind === "connect" || !connected && parsed.kind !== "help" && parsed.kind !== "error") {
+    const existingForConnect = await deps.github.listComments(evt.ref);
+    if (isHandled(existingForConnect, evt.commentId)) return { action: "noop_duplicate" };
+    await deps.github.createComment(evt.ref, connectComment({
+      connected,
+      baseUrl: deps.baseUrl ?? "https://coinpayportal.com",
+      repo: deps.repoFullName ?? `${evt.ref.owner}/${evt.ref.repo}`,
+      defaultCrypto: deps.config.defaultCrypto,
+      requested: parsed.kind === "connect" ? void 0 : parsed.kind
+    }, evt.commentId));
+    return { action: parsed.kind === "connect" ? "connect" : "not_connected" };
   }
   if (parsed.kind === "status") return handleStatus(evt, deps);
   const existing = await deps.github.listComments(evt.ref);
@@ -42300,8 +42467,9 @@ async function run() {
     return;
   }
   const token = core.getInput("github-token", { required: true });
-  const apiKey = core.getInput("coinpay-api-key", { required: true });
-  const businessId = core.getInput("coinpay-business-id", { required: true });
+  const apiKey = core.getInput("coinpay-api-key").trim();
+  const businessId = core.getInput("coinpay-business-id").trim();
+  const connected = Boolean(apiKey && businessId);
   const baseUrl = core.getInput("coinpay-base-url") || "https://coinpayportal.com";
   const trustedCommentAuthor = core.getInput("trusted-comment-author") || "github-actions[bot]";
   const ref = {
@@ -42311,7 +42479,7 @@ async function run() {
   };
   const gh = new OctokitGitHubClient(token, trustedCommentAuthor);
   const config = await loadRepoConfig(gh, token, ref);
-  if (mergeEvent || payload.issue?.pull_request) {
+  if (connected && (mergeEvent || payload.issue?.pull_request)) {
     const contribution = await handleContribution({
       eventName,
       action: payload.action,
@@ -42337,6 +42505,7 @@ async function run() {
       return;
     }
   }
+  if (mergeEvent) return;
   const coinpay = new CoinPayClient({ baseUrl, apiKey, businessId });
   const evt = {
     ref,
@@ -42350,7 +42519,14 @@ async function run() {
     issueUrl: payload.issue.html_url ?? "",
     isPullRequest: payload.issue.pull_request !== void 0
   };
-  const result = await handleComment(evt, { coinpay, github: gh, config });
+  const result = await handleComment(evt, {
+    coinpay,
+    github: gh,
+    config,
+    connected,
+    baseUrl,
+    repoFullName: `${ref.owner}/${ref.repo}`
+  });
   core.info(`coinpaybot action=${result.action}${result.detail ? ` detail=${result.detail}` : ""}`);
   core.setOutput("action", result.action);
   if (result.paymentId) core.setOutput("payment_id", result.paymentId);

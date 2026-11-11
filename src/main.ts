@@ -63,8 +63,11 @@ export async function run(): Promise<void> {
   }
 
   const token = core.getInput('github-token', { required: true });
-  const apiKey = core.getInput('coinpay-api-key', { required: true });
-  const businessId = core.getInput('coinpay-business-id', { required: true });
+  // Optional: an unconnected repo still answers `/coinpay help|connect` with
+  // setup steps instead of failing the run with "Input required".
+  const apiKey = core.getInput('coinpay-api-key').trim();
+  const businessId = core.getInput('coinpay-business-id').trim();
+  const connected = Boolean(apiKey && businessId);
   const baseUrl = core.getInput('coinpay-base-url') || 'https://coinpayportal.com';
   const trustedCommentAuthor =
     core.getInput('trusted-comment-author') || 'github-actions[bot]';
@@ -77,7 +80,7 @@ export async function run(): Promise<void> {
 
   const gh = new OctokitGitHubClient(token, trustedCommentAuthor);
   const config = await loadRepoConfig(gh, token, ref);
-  if (mergeEvent || payload.issue?.pull_request) {
+  if (connected && (mergeEvent || payload.issue?.pull_request)) {
     const contribution = await handleContribution({
       eventName, action: payload.action, ref, repositoryId: payload.repository?.id,
       merged: mergeEvent,
@@ -91,6 +94,7 @@ export async function run(): Promise<void> {
       return;
     }
   }
+  if (mergeEvent) return;
   const coinpay = new CoinPayClient({ baseUrl, apiKey, businessId });
 
   const evt: CommentEvent = {
@@ -106,7 +110,10 @@ export async function run(): Promise<void> {
     isPullRequest: payload.issue!.pull_request !== undefined,
   };
 
-  const result = await handleComment(evt, { coinpay, github: gh, config });
+  const result = await handleComment(evt, {
+    coinpay, github: gh, config, connected, baseUrl,
+    repoFullName: `${ref.owner}/${ref.repo}`,
+  });
   core.info(`coinpaybot action=${result.action}${result.detail ? ` detail=${result.detail}` : ''}`);
   core.setOutput('action', result.action);
   if (result.paymentId) core.setOutput('payment_id', result.paymentId);
